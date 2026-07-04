@@ -71,6 +71,7 @@ hop add personal --tool claude
 ## Safety notes
 
 - Switching between subscription accounts (or capturing/restoring one) rewrites the Keychain / retargets the symlink. By default `hop` warns if `claude`/`codex` is running but proceeds; it always backs up first and verifies, so a botched swap is recoverable from `~/.config/hop/backups/`.
+- Switching to a Claude **subscription** profile removes a leftover console/API-key credential (the `Claude Code` keychain item and `primaryApiKey` in `~/.claude.json`) so it can't shadow the subscription — mirroring what Claude's own `/login` does. The removed key is backed up to `~/.config/hop/backups/` and can be re-minted from the Console. `hop doctor` flags the shadow state if both are ever present at once.
 - Codex's OS-keyring credential store (`cli_auth_credentials_store = keyring|auto`) is unsupported; `hop` refuses rather than silently no-op. Set it to `file` and re-login.
 
 ## Development

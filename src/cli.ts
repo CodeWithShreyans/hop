@@ -10,6 +10,7 @@ import {
   readClaudeKeychain,
   readClaudeProfile,
   refreshClaudeToken,
+  securityFind,
   switchClaudeSub,
   writeClaudeProfile,
 } from "./claude.ts";
@@ -26,6 +27,7 @@ import {
 } from "./codex.ts";
 import { codexJwtClaimsSchema, type Tool } from "./schemas.ts";
 import {
+  claudeApiKeyService,
   claudeCredentialsService,
   claudeJsonPath,
   clearJournal,
@@ -33,6 +35,7 @@ import {
   decodeJwt,
   errMsg,
   hopHome,
+  keychainAccount,
   loadRegistry,
   readJournal,
   runningPids,
@@ -214,22 +217,21 @@ function codexActiveName(): string | null {
   return a.state === "managed" ? a.name : null;
 }
 
-async function switchByTool(tool: Tool, name: string, safe: boolean): Promise<string[]> {
+async function switchByTool(tool: Tool, name: string, safe: boolean): Promise<{ warnings: string[]; notes: string[] }> {
   if (tool === "codex") {
     switchCodex(name);
     const reg = loadRegistry();
     reg.previous.codex = reg.active.codex ?? null;
     reg.active.codex = name;
     saveRegistry(reg);
-    return [];
+    return { warnings: [], notes: [] };
   }
   const profile = readClaudeProfile(name);
   if (profile.kind === "api") {
     claudeApiOn(name);
-    return [];
+    return { warnings: [], notes: [] };
   }
-  const { warnings } = await switchClaudeSub(name, { safe });
-  return warnings;
+  return switchClaudeSub(name, { safe });
 }
 
 function resolveName(name: string): { tool: Tool } {
@@ -243,9 +245,10 @@ function resolveName(name: string): { tool: Tool } {
   throw new Error(`No profile "${name}". Run \`hop status\` to list profiles.`);
 }
 
-function printSwitchResult(tool: Tool, name: string, warnings: string[]): void {
-  for (const warn of warnings) console.log(yellow(`! ${warn}`));
+function printSwitchResult(tool: Tool, name: string, result: { warnings: string[]; notes: string[] }): void {
+  for (const warn of result.warnings) console.log(yellow(`! ${warn}`));
   console.log(green(`✓ ${tool} → ${bold(name)}`));
+  for (const note of result.notes) console.log(dim(`  ${note}`));
   if (tool === "codex") console.log(dim("  Next `codex` run uses this account (refreshes flow into the profile automatically)."));
   else console.log(dim("  Restart claude to pick up the new account."));
 }
@@ -266,8 +269,8 @@ async function cmdUse(positionals: string[], safe: boolean): Promise<void> {
       tool = t;
       name = positionals[1] ?? "";
     }
-    const warnings = await switchByTool(tool, name, safe);
-    printSwitchResult(tool, name, warnings);
+    const result = await switchByTool(tool, name, safe);
+    printSwitchResult(tool, name, result);
   });
 }
 
@@ -283,8 +286,8 @@ async function cmdPrevious(safe: boolean): Promise<void> {
   }
   const tool: Tool = prevClaude ? "claude" : "codex";
   await withLock(async () => {
-    const warnings = await switchByTool(tool, target, safe);
-    printSwitchResult(tool, target, warnings);
+    const result = await switchByTool(tool, target, safe);
+    printSwitchResult(tool, target, result);
   });
 }
 
@@ -297,8 +300,8 @@ async function cmdNext(tool: Tool, safe: boolean): Promise<void> {
   const next = names[(idx + 1) % names.length] ?? names[0];
   if (!next) throw new Error(`No ${tool} profiles.`);
   await withLock(async () => {
-    const warnings = await switchByTool(tool, next, safe);
-    printSwitchResult(tool, next, warnings);
+    const result = await switchByTool(tool, next, safe);
+    printSwitchResult(tool, next, result);
   });
 }
 
@@ -353,8 +356,8 @@ async function cmdClaudeMode(mode: "api" | "sub", name: string | undefined, safe
       return;
     }
     if (!name) throw new Error("Usage: hop claude sub <profile>");
-    const { warnings } = await switchClaudeSub(name, { safe });
-    printSwitchResult("claude", name, warnings);
+    const result = await switchClaudeSub(name, { safe });
+    printSwitchResult("claude", name, result);
   });
 }
 
@@ -421,14 +424,18 @@ async function cmdDoctor(): Promise<void> {
   else if (codexActive.state === "managed") push(true, `Codex active symlink → ${codexActive.name}`);
   else push(true, "Codex logged out");
 
-  // Claude keychain reachability + mcpOAuth presence
+  // Claude keychain reachability + mcpOAuth presence + subscription/API-key shadowing
   try {
     const kc = await readClaudeKeychain();
+    const apiKeyItem = await securityFind(claudeApiKeyService(), keychainAccount());
     if (kc === null) push(true, "Claude keychain item not present (no subscription login captured)");
     else {
       push(true, `Claude keychain readable (service "${claudeCredentialsService()}")`);
       const raw = JSON.parse(kc.raw);
       if (raw && typeof raw === "object" && "mcpOAuth" in raw) push(true, "mcpOAuth present in keychain blob (preserved on swap)");
+    }
+    if (kc?.parsed.claudeAiOauth && apiKeyItem !== null) {
+      push(false, "both a subscription login and a console API key are present — the API key may shadow the subscription; `hop <sub-profile>` clears it");
     }
   } catch (e) {
     push(false, `Claude keychain unreadable: ${errMsg(e)}`);

@@ -164,6 +164,8 @@ export function patchClaudeJsonIdentity(oauthAccount: ClaudeOauthAccount | null)
   const raw = readClaudeJsonRaw();
   if (oauthAccount) raw.oauthAccount = oauthAccount;
   else delete raw.oauthAccount;
+  // primaryApiKey is a "/login managed key" API-billing source; it must not survive a subscription switch.
+  delete raw.primaryApiKey;
   atomicWrite(claudeJsonPath(), `${JSON.stringify(raw, null, 2)}\n`);
 }
 
@@ -248,8 +250,9 @@ export async function readActiveClaude(): Promise<ActiveClaude> {
 }
 
 /** The journaled, backup-first, verify-then-commit swap between subscription accounts. */
-export async function switchClaudeSub(name: string, opts: { safe: boolean }): Promise<{ warnings: string[] }> {
+export async function switchClaudeSub(name: string, opts: { safe: boolean }): Promise<{ warnings: string[]; notes: string[] }> {
   const warnings: string[] = [];
+  const notes: string[] = [];
   const target = readClaudeProfile(name);
   if (target.kind !== "sub" || !target.claudeAiOauth) {
     throw new Error(`Profile "${name}" is not a Claude subscription profile (use \`hop claude api ${name}\` for API profiles).`);
@@ -267,7 +270,7 @@ export async function switchClaudeSub(name: string, opts: { safe: boolean }): Pr
   const liveKc = await readClaudeKeychain();
   const liveApiKey = await securityFind(claudeApiKeyService(), keychainAccount());
   const liveClaudeJson = existsSync(claudeJsonPath()) ? readFileSync(claudeJsonPath(), "utf-8") : null;
-  backup(`claude-switch-to-${name}`, [
+  const backupDir = backup(`claude-switch-to-${name}`, [
     { name: "credentials.json", content: liveKc?.raw ?? null },
     { name: "apikey.txt", content: liveApiKey },
     { name: "claude.json", content: liveClaudeJson },
@@ -293,15 +296,22 @@ export async function switchClaudeSub(name: string, opts: { safe: boolean }): Pr
 
   writeJournal({ op: "claude-switch", to: name, from: outgoing ?? "" });
 
-  // 4. Swap in target: keychain oauth (preserve mcpOAuth), drop the API override, patch identity.
+  // 4. Swap in target: keychain oauth (preserve mcpOAuth), drop the API override, patch identity,
+  //    and remove any leftover console API-key credential so it can't shadow the subscription
+  //    (mirrors what Claude's own subscription /login does). patchClaudeJsonIdentity drops primaryApiKey.
   await writeClaudeOauth(target.claudeAiOauth);
   claudeApiOff();
   patchClaudeJsonIdentity(target.oauthAccount ?? null);
+  if (liveApiKey !== null) {
+    await securityDelete(claudeApiKeyService(), keychainAccount());
+    notes.push(`removed a leftover console API-key keychain item (backed up to ${backupDir})`);
+  }
 
   // 5. Verify; roll back from the backup on mismatch.
   const after = await readClaudeKeychain();
   if (after?.parsed.claudeAiOauth?.accessToken !== target.claudeAiOauth.accessToken) {
     if (liveKc) await securityAdd(claudeCredentialsService(), keychainAccount(), liveKc.raw);
+    if (liveApiKey !== null) await securityAdd(claudeApiKeyService(), keychainAccount(), liveApiKey);
     if (liveClaudeJson !== null) atomicWrite(claudeJsonPath(), liveClaudeJson, 0o600);
     clearJournal();
     throw new Error(`Verification failed switching to "${name}"; rolled back to the previous account.`);
@@ -312,7 +322,7 @@ export async function switchClaudeSub(name: string, opts: { safe: boolean }): Pr
   reg.active.claude = name;
   saveRegistry(reg);
   clearJournal();
-  return { warnings };
+  return { warnings, notes };
 }
 
 export function claudeIdentityLabel(profile: ClaudeProfile): { email?: string; plan?: string } {

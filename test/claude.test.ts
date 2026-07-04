@@ -123,6 +123,50 @@ test("switch swaps claudeAiOauth, preserves mcpOAuth, patches claude.json, syncs
   expect(readdirSync(path.join(process.env.HOP_HOME ?? "", "backups")).length).toBeGreaterThan(0);
 });
 
+test("sub-switch removes a leftover console API-key item + primaryApiKey (mirrors native login)", async () => {
+  await securityAdd(
+    claudeCredentialsService(),
+    keychainAccount(),
+    JSON.stringify({ claudeAiOauth: oauth("A-access", "rt-a"), mcpOAuth: { notion: "n-tok" } }),
+  );
+  // A leftover console/API-key credential in both of its storage locations.
+  await securityAdd(claudeApiKeyService(), keychainAccount(), "sk-ant-api-leftover");
+  atomicWrite(
+    claudeJsonPath(),
+    JSON.stringify({ oauthAccount: { accountUuid: "uuid-a", emailAddress: "a@x.com" }, primaryApiKey: "sk-ant-api-leftover" }),
+  );
+
+  writeClaudeProfile(subProfile("acct-a", "A-access", "uuid-a", "a@x.com"));
+  writeClaudeProfile(subProfile("acct-b", "B-access", "uuid-b", "b@x.com"));
+  saveRegistry({
+    version: 1,
+    profiles: [
+      { name: "acct-a", tool: "claude", kind: "sub", savedAt: "t" },
+      { name: "acct-b", tool: "claude", kind: "sub", savedAt: "t" },
+    ],
+    active: { claude: "acct-a" },
+    previous: {},
+  });
+
+  const { notes } = await switchClaudeSub("acct-b", { safe: false });
+
+  // The console API-key item is gone from both places.
+  expect(await securityFind(claudeApiKeyService(), keychainAccount())).toBeNull();
+  const cj = JSON.parse(await Bun.file(claudeJsonPath()).text());
+  expect(cj.primaryApiKey).toBeUndefined();
+  expect(notes.some((n) => n.includes("console API-key"))).toBe(true);
+
+  // Subscription swap still correct: target active, mcpOAuth preserved.
+  const blob = JSON.parse((await securityFind(claudeCredentialsService(), keychainAccount())) ?? "{}");
+  expect(blob.claudeAiOauth.accessToken).toBe("B-access");
+  expect(blob.mcpOAuth).toEqual({ notion: "n-tok" });
+
+  // The removed key was backed up.
+  const backupsRoot = path.join(process.env.HOP_HOME ?? "", "backups");
+  const dirs = readdirSync(backupsRoot);
+  expect(dirs.some((d) => existsSync(path.join(backupsRoot, d, "apikey.txt")))).toBe(true);
+});
+
 test("API override toggles apiKeyHelper on and off", async () => {
   writeClaudeProfile({ name: "api1", kind: "api", apiKey: "sk-ant-test-key", savedAt: "t" });
   saveRegistry({ version: 1, profiles: [{ name: "api1", tool: "claude", kind: "api", savedAt: "t" }], active: {}, previous: {} });
