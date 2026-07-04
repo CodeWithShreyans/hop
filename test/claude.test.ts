@@ -202,6 +202,64 @@ test("API-billing switch is non-destructive — subscription OAuth survives for 
   expect(loadRegistry().active.claude).toBe("work.sub");
 });
 
+test("toggling back to sub keeps the fresher LIVE keychain token over a stale snapshot", async () => {
+  // While the api override was active, the keychain kept work's oauth — which had rotated PAST the
+  // stored snapshot (e.g. a status refresh). Switching back to work.sub must keep the live token.
+  await securityAdd(
+    claudeCredentialsService(),
+    keychainAccount(),
+    JSON.stringify({ claudeAiOauth: oauth("A-live-rotated", "rt-live"), mcpOAuth: { notion: "n" } }),
+  );
+  atomicWrite(claudeJsonPath(), JSON.stringify({ oauthAccount: { accountUuid: "uuid-a", emailAddress: "a@x.com" } }));
+  writeClaudeProfile(subProfile("work", "A-stale-snapshot", "uuid-a", "a@x.com"));
+  writeClaudeProfile({ name: "work", kind: "api", apiKey: "sk-ant-api-x", savedAt: "t" });
+  saveRegistry({
+    version: 1,
+    profiles: [
+      { name: "work", tool: "claude", kind: "sub", savedAt: "t" },
+      { name: "work", tool: "claude", kind: "api", savedAt: "t" },
+    ],
+    active: { claude: "work.api" }, // api override active; outgoing kind is NOT sub
+    previous: {},
+  });
+
+  await switchClaudeSub("work", { safe: false });
+
+  const blob = JSON.parse((await securityFind(claudeCredentialsService(), keychainAccount())) ?? "{}");
+  expect(blob.claudeAiOauth.accessToken).toBe("A-live-rotated"); // live token won, not the snapshot
+  expect(readClaudeProfile("work", "sub").claudeAiOauth?.accessToken).toBe("A-live-rotated"); // profile synced
+  expect(loadRegistry().active.claude).toBe("work.sub");
+});
+
+test("sync-back refuses to fold a foreign live token into the outgoing profile", async () => {
+  // Keychain holds a token whose identity (uuid-foreign) matches NEITHER the outgoing nor the target
+  // profile — folding it into acct-a would corrupt that snapshot with someone else's credential.
+  await securityAdd(
+    claudeCredentialsService(),
+    keychainAccount(),
+    JSON.stringify({ claudeAiOauth: oauth("FOREIGN-live", "rt-foreign") }),
+  );
+  atomicWrite(claudeJsonPath(), JSON.stringify({ oauthAccount: { accountUuid: "uuid-foreign", emailAddress: "f@x.com" } }));
+  writeClaudeProfile(subProfile("acct-a", "A-snapshot", "uuid-a", "a@x.com"));
+  writeClaudeProfile(subProfile("acct-b", "B-access", "uuid-b", "b@x.com"));
+  saveRegistry({
+    version: 1,
+    profiles: [
+      { name: "acct-a", tool: "claude", kind: "sub", savedAt: "t" },
+      { name: "acct-b", tool: "claude", kind: "sub", savedAt: "t" },
+    ],
+    active: { claude: "acct-a.sub" },
+    previous: {},
+  });
+
+  await switchClaudeSub("acct-b", { safe: false });
+
+  // Outgoing snapshot untouched; target's own snapshot went live.
+  expect(readClaudeProfile("acct-a", "sub").claudeAiOauth?.accessToken).toBe("A-snapshot");
+  const blob = JSON.parse((await securityFind(claudeCredentialsService(), keychainAccount())) ?? "{}");
+  expect(blob.claudeAiOauth.accessToken).toBe("B-access");
+});
+
 test("API override toggles apiKeyHelper on and off", async () => {
   writeClaudeProfile({ name: "api1", kind: "api", apiKey: "sk-ant-test-key", savedAt: "t" });
   saveRegistry({ version: 1, profiles: [{ name: "api1", tool: "claude", kind: "api", savedAt: "t" }], active: {}, previous: {} });

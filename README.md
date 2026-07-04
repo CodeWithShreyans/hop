@@ -34,11 +34,14 @@ hop completions fish > ~/.config/fish/completions/hop.fish
 
 A profile is **(tool, name, kind)** — the same name can exist as `sub` and `api` for each tool, so "work" can have up to 4 variations. Switching to an `api` profile flips billing automatically (Claude: `apiKeyHelper` toggle; Codex: symlink to an API-key auth.json); switching to a `sub` profile swaps the login and clears any API override.
 
+Without a `--sub`/`--api` flag, hop picks the kind for you: switching **within the active profile** toggles sub↔api (`hop claude work` while on `work (sub)` flips to API billing — the "I just hit my limit" motion); switching to a **different profile** defaults to sub, unless that sub's 5h/weekly window is already exhausted, in which case it goes to api. Landing on an exhausted sub always warns after the switch.
+
 ```bash
 hop                         # status table: which account is active, how much headroom
-hop codex work              # switch (kind auto-resolves when only one variation exists)
-hop claude work --api       # hit your sub limit? flip work's billing to API
-hop claude work --sub       # ...and back to the subscription (no re-login)
+hop claude work             # on work (sub) and hit the limit? this toggles to work (api)
+hop claude work             # ...and again to toggle back to the subscription
+hop codex other             # different profile: defaults to sub (api if that sub is tapped out)
+hop claude work --sub       # explicit kind always wins
 hop -                       # switch to the previous profile
 hop next codex              # rotate to the next codex profile
 

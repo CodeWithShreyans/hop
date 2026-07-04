@@ -87,30 +87,83 @@ type Row = {
 
 const skipUsage = (): boolean => Boolean(process.env.HOP_SKIP_USAGE);
 
+type SubWindows = { fiveHour: UsageWindow; weekly: UsageWindow };
+
+/** Live 5h/weekly windows for a codex sub profile (refreshes an inactive profile's expired token). */
+async function codexSubWindows(name: string, isActive: boolean): Promise<SubWindows> {
+  let auth = readCodexProfile(name, "sub");
+  if (!auth.tokens?.access_token) return { fiveHour: null, weekly: null };
+  const exp = decodeJwt(auth.tokens.access_token, codexJwtClaimsSchema)?.exp ?? null;
+  if (!isActive && exp && exp * 1000 < Date.now() + 60_000 && auth.tokens.refresh_token) {
+    auth = await refreshCodexProfile(name, "sub");
+  }
+  const token = auth.tokens?.access_token;
+  if (!token) return { fiveHour: null, weekly: null };
+  const usage = await fetchCodexUsage(token, codexIdentity(auth).accountId);
+  const prim = usage.rate_limit?.primary_window;
+  const sec = usage.rate_limit?.secondary_window;
+  return {
+    fiveHour: prim ? { pct: prim.used_percent, resetMs: prim.reset_at ? prim.reset_at * 1000 - Date.now() : null } : null,
+    weekly: sec ? { pct: sec.used_percent, resetMs: sec.reset_at ? sec.reset_at * 1000 - Date.now() : null } : null,
+  };
+}
+
+/** Live 5h/weekly windows for a claude sub profile (live keychain token when active). */
+async function claudeSubWindows(name: string, isActive: boolean): Promise<SubWindows> {
+  const profile = readClaudeProfile(name, "sub");
+  if (!profile.claudeAiOauth) return { fiveHour: null, weekly: null };
+  let oauth = profile.claudeAiOauth;
+  if (isActive) {
+    const kc = await readClaudeKeychain();
+    if (kc?.parsed.claudeAiOauth) oauth = kc.parsed.claudeAiOauth;
+  } else if (oauth.expiresAt && oauth.expiresAt < Date.now() + 60_000) {
+    oauth = await refreshClaudeToken(oauth);
+    writeClaudeProfile({ ...profile, claudeAiOauth: oauth });
+  }
+  const usage = await fetchClaudeUsage(oauth.accessToken);
+  const toWin = (u: { utilization?: number | null; resets_at?: string | null } | null | undefined): UsageWindow => {
+    if (!u || u.utilization === null || u.utilization === undefined) return null;
+    return { pct: u.utilization, resetMs: u.resets_at ? Date.parse(u.resets_at) - Date.now() : null };
+  };
+  return { fiveHour: toWin(usage.five_hour), weekly: toWin(usage.seven_day) };
+}
+
+/** Windows or null when unknowable (usage disabled, network/auth failure) — callers fail open. */
+async function subWindowsSafe(tool: Tool, name: string, isActive: boolean): Promise<SubWindows | null> {
+  if (skipUsage()) return null;
+  try {
+    return tool === "codex" ? await codexSubWindows(name, isActive) : await claudeSubWindows(name, isActive);
+  } catch {
+    return null;
+  }
+}
+
+/** "5h at 100% (resets in 2h47m); weekly at 100%" when any window is exhausted, else null. */
+function exhaustedLabel(w: SubWindows | null): string | null {
+  if (!w) return null;
+  const part = (label: string, win: UsageWindow): string | null =>
+    win && win.pct >= 100
+      ? `${label} at ${Math.round(win.pct)}%${win.resetMs !== null && win.resetMs > 0 ? ` (resets in ${fmtCountdown(win.resetMs)})` : ""}`
+      : null;
+  const parts = [part("5h", w.fiveHour), part("weekly", w.weekly)].filter((p) => p !== null);
+  return parts.length ? parts.join("; ") : null;
+}
+
 async function codexRows(): Promise<Row[]> {
   const active = readActiveCodex();
   const activeKey = active.state === "managed" ? profileKey(active.name, active.kind) : null;
   return Promise.all(
     listCodexProfiles().map(async ({ name, kind }): Promise<Row> => {
       const isActive = profileKey(name, kind) === activeKey;
-      let auth = readCodexProfile(name, kind);
+      const auth = readCodexProfile(name, kind);
       const id = codexIdentity(auth);
       const label = kind === "api" ? "API billing" : [id.plan, id.email].filter(Boolean).join(" · ") || "subscription";
       const row: Row = { tool: "codex", name, kind, active: isActive, label, fiveHour: null, weekly: null };
-      if (kind === "api" || skipUsage() || !auth.tokens?.access_token) return row;
+      if (kind === "api" || skipUsage()) return row;
       try {
-        const claims = decodeJwt(auth.tokens.access_token, codexJwtClaimsSchema);
-        const exp = claims?.exp ?? null;
-        if (!isActive && exp && exp * 1000 < Date.now() + 60_000 && auth.tokens.refresh_token) {
-          auth = await refreshCodexProfile(name, kind);
-        }
-        const token = auth.tokens?.access_token;
-        if (!token) return row;
-        const usage = await fetchCodexUsage(token, id.accountId);
-        const prim = usage.rate_limit?.primary_window;
-        const sec = usage.rate_limit?.secondary_window;
-        if (prim) row.fiveHour = { pct: prim.used_percent, resetMs: prim.reset_at ? prim.reset_at * 1000 - Date.now() : null };
-        if (sec) row.weekly = { pct: sec.used_percent, resetMs: sec.reset_at ? sec.reset_at * 1000 - Date.now() : null };
+        const w = await codexSubWindows(name, isActive);
+        row.fiveHour = w.fiveHour;
+        row.weekly = w.weekly;
       } catch (e) {
         row.note = errMsg(e);
       }
@@ -141,24 +194,11 @@ async function claudeRows(): Promise<Row[]> {
         if (active.helperActive && isActive) row.note = "active override";
         return row;
       }
-      if (skipUsage() || !profile.claudeAiOauth) return row;
+      if (skipUsage()) return row;
       try {
-        let oauth = profile.claudeAiOauth;
-        if (isActive) {
-          const kc = await readClaudeKeychain();
-          if (kc?.parsed.claudeAiOauth) oauth = kc.parsed.claudeAiOauth;
-        } else if (oauth.expiresAt && oauth.expiresAt < Date.now() + 60_000) {
-          oauth = await refreshClaudeToken(oauth);
-          writeClaudeProfile({ ...profile, claudeAiOauth: oauth });
-        }
-        const usage = await fetchClaudeUsage(oauth.accessToken);
-        const toWin = (u: { utilization?: number | null; resets_at?: string | null } | null | undefined): UsageWindow => {
-          if (!u || u.utilization === null || u.utilization === undefined) return null;
-          const reset = u.resets_at ? Date.parse(u.resets_at) - Date.now() : null;
-          return { pct: u.utilization, resetMs: reset };
-        };
-        row.fiveHour = toWin(usage.five_hour);
-        row.weekly = toWin(usage.seven_day);
+        const w = await claudeSubWindows(name, isActive);
+        row.fiveHour = w.fiveHour;
+        row.weekly = w.weekly;
       } catch (e) {
         row.note = errMsg(e);
       }
@@ -228,7 +268,7 @@ function codexActiveKey(): string | null {
   return a.state === "managed" ? profileKey(a.name, a.kind) : null;
 }
 
-/** Resolve which kind of `<tool> <name>` to use: explicit flag wins; else the only existing variation. */
+/** Strict resolution (used by rm): explicit flag wins; else the only existing variation; ambiguity errors. */
 function resolveKind(tool: Tool, name: string, kindFlag: Kind | null): Kind {
   const variations = (tool === "codex" ? listCodexProfiles() : listClaudeProfiles())
     .filter((p) => p.name === name)
@@ -245,6 +285,41 @@ function resolveKind(tool: Tool, name: string, kindFlag: Kind | null): Kind {
     throw new Error(`"${name}" exists as both sub and api for ${tool}. Add --sub or --api.`);
   }
   return first;
+}
+
+/** Switch resolution when no kind flag is given: same profile → toggle sub↔api;
+ *  different profile → sub, unless that sub's 5h/weekly limit is exhausted → api.
+ *  Returns the windows when they were fetched so the caller can warn without refetching. */
+async function resolveSwitchKind(
+  tool: Tool,
+  name: string,
+  kindFlag: Kind | null,
+): Promise<{ kind: Kind; notes: string[]; windows: SubWindows | null }> {
+  const variations = (tool === "codex" ? listCodexProfiles() : listClaudeProfiles())
+    .filter((p) => p.name === name)
+    .map((p) => p.kind);
+  if (kindFlag) {
+    if (!variations.includes(kindFlag)) {
+      throw new Error(`No ${tool} profile "${name}" (${kindFlag}). Run \`hop status\` to list profiles.`);
+    }
+    return { kind: kindFlag, notes: [], windows: null };
+  }
+  const first = variations[0];
+  if (first === undefined) throw new Error(`No ${tool} profile "${name}". Run \`hop status\` to list profiles.`);
+  if (variations.length === 1) return { kind: first, notes: [], windows: null };
+
+  const activeKey = tool === "codex" ? codexActiveKey() : loadRegistry().active[tool] ?? null;
+  const active = activeKey ? parseProfileKey(activeKey) : null;
+  if (active?.name === name) {
+    const kind: Kind = active.kind === "sub" ? "api" : "sub";
+    return { kind, notes: [`same profile — toggled ${active.kind} → ${kind}`], windows: null };
+  }
+  const windows = await subWindowsSafe(tool, name, false);
+  const ex = exhaustedLabel(windows);
+  if (ex) {
+    return { kind: "api", notes: [`"${name}" subscription is exhausted (${ex}) — defaulting to api; use --sub to override`], windows };
+  }
+  return { kind: "sub", notes: [], windows };
 }
 
 /** Switching to an api profile toggles billing automatically; a sub profile swaps the login. */
@@ -275,9 +350,15 @@ function printSwitchResult(tool: Tool, name: string, kind: Kind, result: { warni
 async function cmdUse(tool: Tool, name: string, kindFlag: Kind | null, safe: boolean): Promise<void> {
   if (!name) throw new Error(`Usage: hop ${tool} <name> [--sub|--api]`);
   await withLock(async () => {
-    const kind = resolveKind(tool, name, kindFlag);
+    const { kind, notes, windows } = await resolveSwitchKind(tool, name, kindFlag);
     const result = await switchByTool(tool, name, kind, safe);
+    result.notes.push(...notes);
     printSwitchResult(tool, name, kind, result);
+    // Landing on a sub with a consumed 5h/weekly window deserves a heads-up — after the switch.
+    if (kind === "sub") {
+      const ex = exhaustedLabel(windows ?? (await subWindowsSafe(tool, name, true)));
+      if (ex) console.log(yellow(`! this subscription is exhausted — ${ex}. Flip to API billing: hop ${tool} ${name} --api`));
+    }
   });
 }
 
@@ -518,7 +599,9 @@ USAGE
   hop                             status table (which account, usage headroom)
   hop status [--json]
   hop <tool> <name> [--sub|--api] switch; tool = claude | codex
-                                  (kind flag only needed when both variations exist)
+                                  no flag: same profile → toggles sub↔api;
+                                  different profile → sub (or api when that
+                                  sub's 5h/weekly limit is exhausted)
   hop -                           switch to the previous profile
   hop next <tool>                 rotate to the next profile of a tool
   hop add <name> --tool <t>       capture the current live login as a profile

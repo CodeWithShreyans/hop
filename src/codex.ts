@@ -23,7 +23,7 @@ import { atomicWrite, codexHome, copyFile0600, decodeJwt, parseProfileKey, profi
 
 const OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token";
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
-const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+const USAGE_URL = process.env.HOP_CODEX_USAGE_URL ?? "https://chatgpt.com/backend-api/wham/usage";
 
 export const codexAuthPath = (): string => path.join(codexHome(), "auth.json");
 export const codexAccountsDir = (): string => path.join(codexHome(), "accounts");

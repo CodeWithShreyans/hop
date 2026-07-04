@@ -38,7 +38,7 @@ import {
 
 const CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
 const CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
+const CLAUDE_USAGE_URL = process.env.HOP_CLAUDE_USAGE_URL ?? "https://api.anthropic.com/api/oauth/usage";
 
 const jsonObjectSchema = z.record(z.string(), z.unknown());
 
@@ -283,21 +283,39 @@ export async function switchClaudeSub(name: string, opts: { safe: boolean }): Pr
     { name: "claude.json", content: liveClaudeJson },
   ]);
 
-  // 3. Sync-back the outgoing account's (possibly rotated) live tokens into its profile.
+  // 3. Sync-back: claude only rotates tokens forward, so the LIVE keychain token supersedes any
+  //    stored snapshot of the SAME account. Attribute it by accountUuid (~/.claude.json identity
+  //    cache) and fold it into the profile that owns it — the target itself when toggling back
+  //    from an api override, or the outgoing sub account on a sub→sub switch.
   const reg = loadRegistry();
   const outgoing = reg.active.claude ?? null;
   const outgoingParsed = outgoing ? parseProfileKey(outgoing) : null;
   const targetKey = profileKey(name, "sub");
-  if (outgoingParsed?.kind === "sub" && outgoing !== targetKey && liveKc?.parsed.claudeAiOauth) {
-    try {
-      const prev = readClaudeProfile(outgoingParsed.name, "sub");
-      writeClaudeProfile({
-        ...prev,
-        claudeAiOauth: liveKc.parsed.claudeAiOauth,
-        oauthAccount: readClaudeOauthAccount() ?? prev.oauthAccount,
-      });
-    } catch (e) {
-      warnings.push(`Could not sync-back outgoing account "${outgoing}": ${errMsg(e)}`);
+  const liveOauth = liveKc?.parsed.claudeAiOauth ?? null;
+  const liveUuid = readClaudeOauthAccount()?.accountUuid ?? null;
+  let effectiveTarget = target.claudeAiOauth;
+  if (liveOauth) {
+    const ownedByTarget = liveUuid !== null && target.oauthAccount?.accountUuid === liveUuid;
+    // On an identity-less toggle-back (same name, api → sub) the keychain base can only be the target's.
+    const unattributableToggleBack =
+      outgoingParsed?.kind === "api" && outgoingParsed.name === name && liveUuid === null && !target.oauthAccount?.accountUuid;
+    if (ownedByTarget || unattributableToggleBack) {
+      effectiveTarget = liveOauth;
+      writeClaudeProfile({ ...target, claudeAiOauth: liveOauth });
+    } else if (outgoingParsed?.kind === "sub" && outgoing !== targetKey) {
+      try {
+        const prev = readClaudeProfile(outgoingParsed.name, "sub");
+        // Only fold the live token into the outgoing profile when ownership matches (or is unknowable).
+        if (!liveUuid || !prev.oauthAccount?.accountUuid || prev.oauthAccount.accountUuid === liveUuid) {
+          writeClaudeProfile({
+            ...prev,
+            claudeAiOauth: liveOauth,
+            oauthAccount: readClaudeOauthAccount() ?? prev.oauthAccount,
+          });
+        }
+      } catch (e) {
+        warnings.push(`Could not sync-back outgoing account "${outgoing}": ${errMsg(e)}`);
+      }
     }
   }
 
@@ -306,7 +324,7 @@ export async function switchClaudeSub(name: string, opts: { safe: boolean }): Pr
   // 4. Swap in target: keychain oauth (preserve mcpOAuth), drop the API override, patch identity,
   //    and remove any leftover console API-key credential so it can't shadow the subscription
   //    (mirrors what Claude's own subscription /login does). patchClaudeJsonIdentity drops primaryApiKey.
-  await writeClaudeOauth(target.claudeAiOauth);
+  await writeClaudeOauth(effectiveTarget);
   claudeApiOff();
   patchClaudeJsonIdentity(target.oauthAccount ?? null);
   if (liveApiKey !== null) {
@@ -316,7 +334,7 @@ export async function switchClaudeSub(name: string, opts: { safe: boolean }): Pr
 
   // 5. Verify; roll back from the backup on mismatch.
   const after = await readClaudeKeychain();
-  if (after?.parsed.claudeAiOauth?.accessToken !== target.claudeAiOauth.accessToken) {
+  if (after?.parsed.claudeAiOauth?.accessToken !== effectiveTarget.accessToken) {
     if (liveKc) await securityAdd(claudeCredentialsService(), keychainAccount(), liveKc.raw);
     if (liveApiKey !== null) await securityAdd(claudeApiKeyService(), keychainAccount(), liveApiKey);
     if (liveClaudeJson !== null) atomicWrite(claudeJsonPath(), liveClaudeJson, 0o600);
