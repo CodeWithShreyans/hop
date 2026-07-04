@@ -132,6 +132,21 @@ export const codexUsageSchema = z.looseObject({
 });
 export type CodexUsage = z.infer<typeof codexUsageSchema>;
 
+/** GET /wham/rate-limit-reset-credits — on-demand usage-limit reset credits (subscription feature). */
+export const codexResetCreditsSchema = z.looseObject({
+  credits: z
+    .array(
+      z.looseObject({
+        id: z.string().nullish(),
+        reset_type: z.string().nullish(),
+        status: z.string().nullish(),
+        expires_at: z.string().nullish(),
+      }),
+    )
+    .nullish(),
+  available_count: z.number().nullish(),
+});
+
 const claudeWindowSchema = z.looseObject({
   utilization: z.number().nullish(),
   resets_at: z.string().nullish(),

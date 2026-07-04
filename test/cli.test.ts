@@ -32,21 +32,44 @@ async function hop(args: string[], extraEnv: Record<string, string> = {}): Promi
   return { code, out: out + err };
 }
 
-/** Codex usage endpoint fixture with the given 5h/weekly used percentages. */
-function usageServer(fiveHourPct: number, weeklyPct: number): ReturnType<typeof Bun.serve> {
+/** Codex backend fixture: /usage with the given percentages, /credits with reset-credit entries. */
+function usageServer(
+  fiveHourPct: number,
+  weeklyPct: number,
+  credits: { status: string; expires_at?: string | null }[] = [],
+): ReturnType<typeof Bun.serve> {
   const now = Math.floor(Date.now() / 1000);
   return Bun.serve({
     port: 0,
-    fetch: () =>
-      Response.json({
+    fetch: (req) => {
+      if (new URL(req.url).pathname.endsWith("/credits")) {
+        return Response.json({
+          available_count: credits.length,
+          credits: credits.map((c, i) => ({
+            id: `credit-${i}`,
+            reset_type: "five_hour",
+            status: c.status,
+            granted_at: "2026-07-01T00:00:00Z",
+            expires_at: c.expires_at ?? null,
+          })),
+        });
+      }
+      return Response.json({
         plan_type: "team",
         rate_limit: {
           primary_window: { used_percent: fiveHourPct, reset_at: now + 3600, limit_window_seconds: 18000 },
           secondary_window: { used_percent: weeklyPct, reset_at: now + 86400, limit_window_seconds: 604800 },
         },
-      }),
+      });
+    },
   });
 }
+
+const mockEnv = (server: ReturnType<typeof Bun.serve>): Record<string, string> => ({
+  HOP_SKIP_USAGE: "",
+  HOP_CODEX_USAGE_URL: `http://localhost:${server.port}/usage`,
+  HOP_CODEX_RESET_CREDITS_URL: `http://localhost:${server.port}/credits`,
+});
 
 const activeCodexKey = (): string =>
   path.basename(readlinkSync(path.join(env.CODEX_HOME ?? "", "auth.json"))).replace(/\.json$/, "");
@@ -112,7 +135,7 @@ test("single-variation names resolve without a flag", async () => {
 test("no flag, different profile with an exhausted sub: defaults to api", async () => {
   const server = usageServer(100, 12);
   try {
-    const res = await hop(["codex", "work"], { HOP_SKIP_USAGE: "", HOP_CODEX_USAGE_URL: `http://localhost:${server.port}/` });
+    const res = await hop(["codex", "work"], mockEnv(server));
     expect(res.code).toBe(0);
     expect(res.out).toContain("defaulting to api");
     expect(activeCodexKey()).toBe("work.api");
@@ -124,11 +147,41 @@ test("no flag, different profile with an exhausted sub: defaults to api", async 
 test("explicitly switching to an exhausted sub warns after switching", async () => {
   const server = usageServer(30, 100);
   try {
-    const res = await hop(["codex", "work", "--sub"], { HOP_SKIP_USAGE: "", HOP_CODEX_USAGE_URL: `http://localhost:${server.port}/` });
+    const res = await hop(["codex", "work", "--sub"], mockEnv(server));
     expect(res.code).toBe(0);
     expect(activeCodexKey()).toBe("work.sub"); // the switch itself completes
     expect(res.out).toContain("subscription is exhausted");
     expect(res.out).toContain("weekly at 100%");
+  } finally {
+    server.stop();
+  }
+});
+
+test("status counts usage-limit reset credits the way CodexBar does (available + unexpired only)", async () => {
+  const server = usageServer(40, 10, [
+    { status: "available" }, // counts (no expiry)
+    { status: "available", expires_at: new Date(Date.now() + 86_400_000).toISOString() }, // counts
+    { status: "available", expires_at: "2020-01-01T00:00:00Z" }, // expired → filtered
+    { status: "redeemed" }, // consumed → filtered
+  ]);
+  try {
+    const res = await hop(["status", "--json"], mockEnv(server));
+    expect(res.code).toBe(0);
+    const rows: { name: string; kind: string; resets: number | null }[] = JSON.parse(res.out);
+    const subRow = rows.find((r) => r.name === "alice" && r.kind === "sub");
+    expect(subRow?.resets).toBe(2);
+  } finally {
+    server.stop();
+  }
+});
+
+test("exhausted-sub warning mentions available usage-limit resets", async () => {
+  const server = usageServer(100, 10, [{ status: "available" }, { status: "available" }]);
+  try {
+    const res = await hop(["codex", "work", "--sub"], mockEnv(server));
+    expect(res.code).toBe(0);
+    expect(res.out).toContain("subscription is exhausted");
+    expect(res.out).toContain("2 usage-limit resets available");
   } finally {
     server.stop();
   }

@@ -12,6 +12,7 @@ import * as path from "node:path";
 import {
   codexAuthSchema,
   codexJwtClaimsSchema,
+  codexResetCreditsSchema,
   codexUsageSchema,
   oauthRefreshResponseSchema,
   parseOrThrow,
@@ -24,6 +25,8 @@ import { atomicWrite, codexHome, copyFile0600, decodeJwt, parseProfileKey, profi
 const OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token";
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const USAGE_URL = process.env.HOP_CODEX_USAGE_URL ?? "https://chatgpt.com/backend-api/wham/usage";
+const RESET_CREDITS_URL =
+  process.env.HOP_CODEX_RESET_CREDITS_URL ?? "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 
 export const codexAuthPath = (): string => path.join(codexHome(), "auth.json");
 export const codexAccountsDir = (): string => path.join(codexHome(), "accounts");
@@ -205,6 +208,35 @@ export async function refreshCodexProfile(name: string, kind: Kind): Promise<Cod
   };
   atomicWrite(profilePath(name, kind), `${JSON.stringify(updated, null, 2)}\n`);
   return updated;
+}
+
+/** On-demand usage-limit reset credits, counted the way CodexBar does: status "available" and
+ *  unexpired. (The codex binary also carries the sibling …/consume endpoint for redeeming.) */
+export async function fetchCodexResetCredits(
+  accessToken: string,
+  accountId: string | undefined,
+): Promise<{ available: number; nextExpiryMs: number | null }> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${accessToken}`,
+    Accept: "application/json",
+    "User-Agent": "codex-cli",
+    "OpenAI-Beta": "codex-1",
+    originator: "Codex Desktop",
+  };
+  if (accountId) headers["ChatGPT-Account-ID"] = accountId;
+  const res = await fetch(RESET_CREDITS_URL, { headers });
+  if (!res.ok) throw new Error(`Codex reset-credits query failed (HTTP ${res.status}).`);
+  const body = parseOrThrow(codexResetCreditsSchema, await res.json(), "codex reset-credits response");
+  const now = Date.now();
+  const expiries: number[] = [];
+  let available = 0;
+  for (const credit of body.credits ?? []) {
+    const expiresAt = credit.expires_at ? Date.parse(credit.expires_at) : null;
+    if (credit.status !== "available" || (expiresAt !== null && expiresAt <= now)) continue;
+    available++;
+    if (expiresAt !== null) expiries.push(expiresAt - now);
+  }
+  return { available, nextExpiryMs: expiries.length ? Math.min(...expiries) : null };
 }
 
 export async function fetchCodexUsage(accessToken: string, accountId: string | undefined): Promise<CodexUsage> {

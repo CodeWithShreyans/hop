@@ -20,6 +20,7 @@ import {
   assertFileStoreMode,
   codexIdentity,
   createCodexApiProfile,
+  fetchCodexResetCredits,
   fetchCodexUsage,
   listCodexProfiles,
   readActiveCodex,
@@ -82,6 +83,7 @@ type Row = {
   label: string; // plan / email
   fiveHour: UsageWindow;
   weekly: UsageWindow;
+  resets: number | null; // codex on-demand usage-limit reset credits
   note?: string;
 };
 
@@ -158,7 +160,7 @@ async function codexRows(): Promise<Row[]> {
       const auth = readCodexProfile(name, kind);
       const id = codexIdentity(auth);
       const label = kind === "api" ? "API billing" : [id.plan, id.email].filter(Boolean).join(" · ") || "subscription";
-      const row: Row = { tool: "codex", name, kind, active: isActive, label, fiveHour: null, weekly: null };
+      const row: Row = { tool: "codex", name, kind, active: isActive, label, fiveHour: null, weekly: null, resets: null };
       if (kind === "api" || skipUsage()) return row;
       try {
         const w = await codexSubWindows(name, isActive);
@@ -166,6 +168,13 @@ async function codexRows(): Promise<Row[]> {
         row.weekly = w.weekly;
       } catch (e) {
         row.note = errMsg(e);
+      }
+      try {
+        // Re-read: codexSubWindows may have refreshed (rotated) the profile's tokens.
+        const token = readCodexProfile(name, kind).tokens?.access_token;
+        if (token) row.resets = (await fetchCodexResetCredits(token, id.accountId)).available;
+      } catch {
+        /* informational column only */
       }
       return row;
     }),
@@ -189,6 +198,7 @@ async function claudeRows(): Promise<Row[]> {
         label: [kind === "api" ? "API billing" : idl.plan, idl.email].filter(Boolean).join(" · ") || kind,
         fiveHour: null,
         weekly: null,
+        resets: null,
       };
       if (kind === "api") {
         if (active.helperActive && isActive) row.note = "active override";
@@ -220,14 +230,15 @@ function renderTable(rows: Row[]): string {
   if (rows.length === 0) {
     return dim("No profiles yet. Capture your current logins:\n  hop add <name> --tool codex\n  hop add <name> --tool claude");
   }
-  const header = ["", "TOOL", "PROFILE", "KIND", "PLAN", "5H", "WEEK", "RESET"];
+  const header = ["", "TOOL", "PROFILE", "KIND", "PLAN", "5H", "WEEK", "RESET IN", "RESETS"];
   const body = rows.map((r) => {
     const c = cell(r.fiveHour);
     const w = cell(r.weekly);
     const resetText = r.fiveHour ? c.reset : w.reset;
     const plan = r.note ? `${r.label} ${dim(`(${r.note})`)}` : r.label;
+    const resets = r.resets === null ? dim("—") : r.resets > 0 ? green(String(r.resets)) : String(r.resets);
     return {
-      cells: [r.active ? green("●") : " ", r.tool, r.name, r.kind, plan, c.pct, w.pct, resetText],
+      cells: [r.active ? green("●") : " ", r.tool, r.name, r.kind, plan, c.pct, w.pct, resetText, resets],
       strong: r.active,
     };
   });
@@ -357,7 +368,26 @@ async function cmdUse(tool: Tool, name: string, kindFlag: Kind | null, safe: boo
     // Landing on a sub with a consumed 5h/weekly window deserves a heads-up — after the switch.
     if (kind === "sub") {
       const ex = exhaustedLabel(windows ?? (await subWindowsSafe(tool, name, true)));
-      if (ex) console.log(yellow(`! this subscription is exhausted — ${ex}. Flip to API billing: hop ${tool} ${name} --api`));
+      if (ex) {
+        console.log(yellow(`! this subscription is exhausted — ${ex}. Flip to API billing: hop ${tool} ${name} --api`));
+        if (tool === "codex") {
+          try {
+            const profile = readCodexProfile(name, "sub");
+            const token = profile.tokens?.access_token;
+            if (token) {
+              const rc = await fetchCodexResetCredits(token, codexIdentity(profile).accountId);
+              if (rc.available > 0) {
+                const expiry = rc.nextExpiryMs !== null ? ` (next expires in ${fmtCountdown(rc.nextExpiryMs)})` : "";
+                console.log(
+                  yellow(`! ${rc.available} usage-limit reset${rc.available === 1 ? "" : "s"} available${expiry} — redeem in codex to clear the limit now`),
+                );
+              }
+            }
+          } catch {
+            /* informational only */
+          }
+        }
+      }
     }
   });
 }

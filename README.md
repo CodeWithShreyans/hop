@@ -37,7 +37,8 @@ A profile is **(tool, name, kind)** — the same name can exist as `sub` and `ap
 Without a `--sub`/`--api` flag, hop picks the kind for you: switching **within the active profile** toggles sub↔api (`hop claude work` while on `work (sub)` flips to API billing — the "I just hit my limit" motion); switching to a **different profile** defaults to sub, unless that sub's 5h/weekly window is already exhausted, in which case it goes to api. Landing on an exhausted sub always warns after the switch.
 
 ```bash
-hop                         # status table: which account is active, how much headroom
+hop                         # status table: active account, usage headroom, and (codex) on-demand
+                            # usage-limit RESET credits — available & unexpired, as CodexBar counts them
 hop claude work             # on work (sub) and hit the limit? this toggles to work (api)
 hop claude work             # ...and again to toggle back to the subscription
 hop codex other             # different profile: defaults to sub (api if that sub is tapped out)
