@@ -17,7 +17,17 @@ import { homedir, userInfo } from "node:os";
 import { createHash } from "node:crypto";
 import * as path from "node:path";
 import { z } from "zod";
-import { parseOrThrow, registrySchema, type Registry } from "./schemas.ts";
+import { parseOrThrow, registrySchema, type Kind, type Registry } from "./schemas.ts";
+
+/* ── Profile identity: (tool, name, kind) — "work" can exist as sub AND api per tool ── */
+
+export const NAME_RE = /^[A-Za-z0-9_-]+$/;
+export const profileKey = (name: string, kind: Kind): string => `${name}.${kind}`;
+export function parseProfileKey(key: string): { name: string; kind: Kind } | null {
+  const m = key.match(/^([A-Za-z0-9_-]+)\.(sub|api)$/);
+  if (!m || !m[1]) return null;
+  return { name: m[1], kind: m[2] === "sub" ? "sub" : "api" };
+}
 
 /* ── Locations (all env-overridable so e2e tests never touch real state) ──── */
 
@@ -99,7 +109,7 @@ export function saveRegistry(reg: Registry): void {
 
 /** Insert or replace a profile's metadata in the registry (does not persist). */
 export function upsertProfile(reg: Registry, meta: Registry["profiles"][number]): void {
-  const idx = reg.profiles.findIndex((p) => p.tool === meta.tool && p.name === meta.name);
+  const idx = reg.profiles.findIndex((p) => p.tool === meta.tool && p.name === meta.name && p.kind === meta.kind);
   if (idx >= 0) reg.profiles[idx] = meta;
   else reg.profiles.push(meta);
 }

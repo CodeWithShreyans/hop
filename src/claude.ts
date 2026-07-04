@@ -13,6 +13,7 @@ import {
   type ClaudeOauthAccount,
   type ClaudeProfile,
   type ClaudeUsage,
+  type Kind,
 } from "./schemas.ts";
 import {
   atomicWrite,
@@ -26,10 +27,13 @@ import {
   hopHome,
   keychainAccount,
   loadRegistry,
+  parseProfileKey,
+  profileKey,
   readJsonFile,
   runningPids,
   saveRegistry,
   writeJournal,
+  NAME_RE,
 } from "./store.ts";
 
 const CLAUDE_TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
@@ -130,21 +134,23 @@ export async function fetchClaudeUsage(accessToken: string): Promise<ClaudeUsage
 /* ── hop-side profile files + ~/.claude.json + settings.json ─────────────── */
 
 const claudeProfileDir = (): string => path.join(hopHome(), "claude");
-const claudeProfilePath = (name: string): string => path.join(claudeProfileDir(), `${name}.json`);
+const claudeProfilePath = (name: string, kind: Kind): string =>
+  path.join(claudeProfileDir(), `${profileKey(name, kind)}.json`);
 
-export function listClaudeProfiles(): string[] {
+export function listClaudeProfiles(): { name: string; kind: Kind }[] {
   if (!existsSync(claudeProfileDir())) return [];
   return readdirSync(claudeProfileDir())
     .filter((f) => f.endsWith(".json"))
-    .map((f) => f.replace(/\.json$/, ""))
-    .sort();
+    .map((f) => parseProfileKey(f.replace(/\.json$/, "")))
+    .filter((p) => p !== null)
+    .sort((a, b) => profileKey(a.name, a.kind).localeCompare(profileKey(b.name, b.kind)));
 }
 
-export const readClaudeProfile = (name: string): ClaudeProfile =>
-  readJsonFile(claudeProfilePath(name), claudeProfileSchema, `claude profile "${name}"`);
+export const readClaudeProfile = (name: string, kind: Kind): ClaudeProfile =>
+  readJsonFile(claudeProfilePath(name, kind), claudeProfileSchema, `claude profile "${name}" (${kind})`);
 
 export const writeClaudeProfile = (p: ClaudeProfile): void =>
-  atomicWrite(claudeProfilePath(p.name), `${JSON.stringify(p, null, 2)}\n`);
+  atomicWrite(claudeProfilePath(p.name, p.kind), `${JSON.stringify(p, null, 2)}\n`);
 
 function readClaudeJsonRaw(): Record<string, unknown> {
   const p = claudeJsonPath();
@@ -189,14 +195,14 @@ const apiHelperScriptPath = (): string => path.join(hopHome(), "claude-api-key.s
 
 /** The API-override layer: an apiKeyHelper that outranks subscription OAuth (machine-global, keychain-free). */
 export function claudeApiOn(name: string): void {
-  const profile = readClaudeProfile(name);
-  if (profile.kind !== "api" || !profile.apiKey) throw new Error(`Profile "${name}" is not a Claude API profile.`);
+  const profile = readClaudeProfile(name, "api");
+  if (!profile.apiKey) throw new Error(`Claude API profile "${name}" has no stored key.`);
   atomicWrite(apiKeyFilePath(), profile.apiKey, 0o600);
   atomicWrite(apiHelperScriptPath(), `#!/bin/sh\ncat ${JSON.stringify(apiKeyFilePath())}\n`, 0o755);
   setApiKeyHelper(apiHelperScriptPath());
   const reg = loadRegistry();
   reg.previous.claude = reg.active.claude ?? null;
-  reg.active.claude = name;
+  reg.active.claude = profileKey(name, "api");
   saveRegistry(reg);
 }
 
@@ -214,6 +220,7 @@ export function claudeApiOff(): void {
 /* ── Capture + switch ────────────────────────────────────────────────────── */
 
 export async function adoptClaude(name: string, opts: { api: boolean; apiKey?: string }): Promise<ClaudeProfile> {
+  if (!NAME_RE.test(name)) throw new Error(`Invalid profile name "${name}" (use letters, digits, - and _).`);
   const savedAt = new Date().toISOString();
   if (opts.api) {
     const key = opts.apiKey ?? (await securityFind(claudeApiKeyService(), keychainAccount()));
@@ -253,9 +260,9 @@ export async function readActiveClaude(): Promise<ActiveClaude> {
 export async function switchClaudeSub(name: string, opts: { safe: boolean }): Promise<{ warnings: string[]; notes: string[] }> {
   const warnings: string[] = [];
   const notes: string[] = [];
-  const target = readClaudeProfile(name);
-  if (target.kind !== "sub" || !target.claudeAiOauth) {
-    throw new Error(`Profile "${name}" is not a Claude subscription profile (use \`hop claude api ${name}\` for API profiles).`);
+  const target = readClaudeProfile(name, "sub");
+  if (!target.claudeAiOauth) {
+    throw new Error(`Claude subscription profile "${name}" has no stored OAuth credential.`);
   }
 
   // 1. Process gate (warn-and-proceed by default; --safe blocks).
@@ -279,22 +286,22 @@ export async function switchClaudeSub(name: string, opts: { safe: boolean }): Pr
   // 3. Sync-back the outgoing account's (possibly rotated) live tokens into its profile.
   const reg = loadRegistry();
   const outgoing = reg.active.claude ?? null;
-  if (outgoing && outgoing !== name && liveKc?.parsed.claudeAiOauth) {
+  const outgoingParsed = outgoing ? parseProfileKey(outgoing) : null;
+  const targetKey = profileKey(name, "sub");
+  if (outgoingParsed?.kind === "sub" && outgoing !== targetKey && liveKc?.parsed.claudeAiOauth) {
     try {
-      const prev = readClaudeProfile(outgoing);
-      if (prev.kind === "sub") {
-        writeClaudeProfile({
-          ...prev,
-          claudeAiOauth: liveKc.parsed.claudeAiOauth,
-          oauthAccount: readClaudeOauthAccount() ?? prev.oauthAccount,
-        });
-      }
+      const prev = readClaudeProfile(outgoingParsed.name, "sub");
+      writeClaudeProfile({
+        ...prev,
+        claudeAiOauth: liveKc.parsed.claudeAiOauth,
+        oauthAccount: readClaudeOauthAccount() ?? prev.oauthAccount,
+      });
     } catch (e) {
       warnings.push(`Could not sync-back outgoing account "${outgoing}": ${errMsg(e)}`);
     }
   }
 
-  writeJournal({ op: "claude-switch", to: name, from: outgoing ?? "" });
+  writeJournal({ op: "claude-switch", to: targetKey, from: outgoing ?? "" });
 
   // 4. Swap in target: keychain oauth (preserve mcpOAuth), drop the API override, patch identity,
   //    and remove any leftover console API-key credential so it can't shadow the subscription
@@ -319,7 +326,7 @@ export async function switchClaudeSub(name: string, opts: { safe: boolean }): Pr
 
   // 6. Commit.
   reg.previous.claude = outgoing;
-  reg.active.claude = name;
+  reg.active.claude = targetKey;
   saveRegistry(reg);
   clearJournal();
   return { warnings, notes };

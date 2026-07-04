@@ -18,7 +18,7 @@ The two tools store credentials differently, so `hop` uses a different mechanism
 
 - **Codex** keeps its login in `~/.codex/auth.json` and rewrites it in place (truncate, no rename). `hop` turns `auth.json` into a symlink to `~/.codex/accounts/<name>.json`; switching just retargets the link. Because Codex writes *through* the link, background token refreshes (which rotate the refresh token) land in the active profile automatically — nothing to sync back.
 - **Claude Code** keeps its login in the macOS Keychain (`Claude Code-credentials`), with account identity cached in `~/.claude.json`. Switching subscription accounts is a journaled, backup-first swap: it syncs the live (possibly rotated) token back into the outgoing profile, replaces only `claudeAiOauth` in the keychain blob (preserving `mcpOAuth`), patches the identity in `~/.claude.json`, then verifies and commits — rolling back on any mismatch.
-- **Claude API billing** is a separate layer: `hop claude api` writes an `apiKeyHelper` into `~/.claude/settings.json` that outranks the subscription OAuth. It never touches the Keychain, so flipping to API billing (and back) is instant and safe even mid-session.
+- **Claude API billing** is a separate layer: switching to a claude `api` profile writes an `apiKeyHelper` into `~/.claude/settings.json` that outranks the subscription OAuth. It never touches the Keychain, so flipping to API billing (and back) is instant and safe even mid-session.
 
 `hop` never calls `claude /logout` or `codex logout` (those revoke server-side). The worst case for any single fault is re-logging-in exactly one account.
 
@@ -32,21 +32,23 @@ hop completions fish > ~/.config/fish/completions/hop.fish
 
 ## Usage
 
+A profile is **(tool, name, kind)** — the same name can exist as `sub` and `api` for each tool, so "work" can have up to 4 variations. Switching to an `api` profile flips billing automatically (Claude: `apiKeyHelper` toggle; Codex: symlink to an API-key auth.json); switching to a `sub` profile swaps the login and clears any API override.
+
 ```bash
 hop                         # status table: which account is active, how much headroom
-hop <name>                  # switch to a profile (auto-detects the tool)
-hop codex work              # explicit tool form
+hop codex work              # switch (kind auto-resolves when only one variation exists)
+hop claude work --api       # hit your sub limit? flip work's billing to API
+hop claude work --sub       # ...and back to the subscription (no re-login)
 hop -                       # switch to the previous profile
 hop next codex              # rotate to the next codex profile
 
-hop add work --tool codex           # capture the current codex login as "work"
-hop add work --tool claude          # capture the current claude subscription login
-hop add api --tool claude --api --key sk-ant-…   # store an API-key profile
+hop add work --tool codex                          # capture the current codex login
+hop add work --tool claude                         # capture the current claude subscription login
+hop add work --tool claude --api --key sk-ant-…    # store a claude API-key variation
+hop add work --tool codex  --api --key sk-proj-…   # store a codex API-key variation
 
-hop claude api [name]       # flip Claude to API billing
-hop claude sub work         # restore a Claude subscription account
 hop which                   # active profile per tool
-hop rm <name>               # delete a stored profile snapshot
+hop rm codex work --api     # delete a stored profile snapshot
 hop doctor                  # health checks
 ```
 

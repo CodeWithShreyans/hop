@@ -19,7 +19,7 @@ import {
   type CodexUsage,
   type Kind,
 } from "./schemas.ts";
-import { atomicWrite, codexHome, copyFile0600, decodeJwt } from "./store.ts";
+import { atomicWrite, codexHome, copyFile0600, decodeJwt, parseProfileKey, profileKey, NAME_RE } from "./store.ts";
 
 const OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token";
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -27,11 +27,11 @@ const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 
 export const codexAuthPath = (): string => path.join(codexHome(), "auth.json");
 export const codexAccountsDir = (): string => path.join(codexHome(), "accounts");
-const profilePath = (name: string): string => path.join(codexAccountsDir(), `${name}.json`);
+const profilePath = (name: string, kind: Kind): string => path.join(codexAccountsDir(), `${profileKey(name, kind)}.json`);
 
 export type CodexActive =
-  | { state: "managed"; name: string }
-  | { state: "managed-missing"; name: string }
+  | { state: "managed"; name: string; kind: Kind }
+  | { state: "managed-missing"; name: string; kind: Kind }
   | { state: "unmanaged" }
   | { state: "logged-out" };
 
@@ -59,21 +59,27 @@ export function readActiveCodex(): CodexActive {
   }
   if (!stat.isSymbolicLink()) return { state: "unmanaged" };
   const target = readlinkSync(auth);
-  const name = path.basename(target).replace(/\.json$/, "");
+  const parsed = parseProfileKey(path.basename(target).replace(/\.json$/, ""));
+  if (!parsed) return { state: "unmanaged" };
   const resolved = path.resolve(path.dirname(auth), target);
-  return existsSync(resolved) ? { state: "managed", name } : { state: "managed-missing", name };
+  return existsSync(resolved) ? { state: "managed", ...parsed } : { state: "managed-missing", ...parsed };
 }
 
-export function listCodexProfiles(): string[] {
+export function listCodexProfiles(): { name: string; kind: Kind }[] {
   if (!existsSync(codexAccountsDir())) return [];
   return readdirSync(codexAccountsDir())
     .filter((f) => f.endsWith(".json"))
-    .map((f) => f.replace(/\.json$/, ""))
-    .sort();
+    .map((f) => parseProfileKey(f.replace(/\.json$/, "")))
+    .filter((p) => p !== null)
+    .sort((a, b) => profileKey(a.name, a.kind).localeCompare(profileKey(b.name, b.kind)));
 }
 
-export function readCodexProfile(name: string): CodexAuth {
-  return parseOrThrow(codexAuthSchema, JSON.parse(readFileSync(profilePath(name), "utf-8")), `codex profile "${name}"`);
+export function readCodexProfile(name: string, kind: Kind): CodexAuth {
+  return parseOrThrow(
+    codexAuthSchema,
+    JSON.parse(readFileSync(profilePath(name, kind), "utf-8")),
+    `codex profile "${name}" (${kind})`,
+  );
 }
 
 export function codexIdentity(auth: CodexAuth): { kind: Kind; email?: string; plan?: string; accountId?: string } {
@@ -102,9 +108,10 @@ function atomicSymlink(relTarget: string, linkPath: string): void {
   renameSync(tmp, linkPath);
 }
 
-/** Adopt the current live login as a named profile. Returns whether an already-managed link was forked. */
-export function adoptCodex(name: string): { forkedFrom: string | null; auth: CodexAuth } {
+/** Adopt the current live login as a named profile (kind derived from its content). */
+export function adoptCodex(name: string): { forkedFrom: string | null; kind: Kind; auth: CodexAuth } {
   assertFileStoreMode();
+  if (!NAME_RE.test(name)) throw new Error(`Invalid profile name "${name}" (use letters, digits, - and _).`);
   const auth = codexAuthPath();
   if (!existsSync(auth) && !isSymlink(auth)) {
     throw new Error("No active Codex login found. Run `codex login` first, then `hop add <name> --tool codex`.");
@@ -114,22 +121,36 @@ export function adoptCodex(name: string): { forkedFrom: string | null; auth: Cod
   if (!parsed.tokens && !parsed.OPENAI_API_KEY) {
     throw new Error("Codex auth.json has no credentials (neither OAuth tokens nor an API key).");
   }
+  const kind: Kind = parsed.tokens ? "sub" : "api";
 
   const active = readActiveCodex();
-  const forkedFrom = active.state === "managed" ? active.name : null;
+  const forkedFrom = active.state === "managed" ? profileKey(active.name, active.kind) : null;
 
   // Write the profile from the current effective bytes, then point auth.json at it atomically.
-  copyFile0600(auth, profilePath(name)); // copyFileSync follows symlinks → captures live content
-  atomicSymlink(path.join("accounts", `${name}.json`), auth);
-  return { forkedFrom, auth: parsed };
+  copyFile0600(auth, profilePath(name, kind)); // copyFileSync follows symlinks → captures live content
+  atomicSymlink(path.join("accounts", `${profileKey(name, kind)}.json`), auth);
+  return { forkedFrom, kind, auth: parsed };
 }
 
-export function switchCodex(name: string): void {
+/** Create an API-billing profile directly from a key (what `codex login --api-key` would write). */
+export function createCodexApiProfile(name: string, apiKey: string): void {
+  if (!NAME_RE.test(name)) throw new Error(`Invalid profile name "${name}" (use letters, digits, - and _).`);
+  atomicWrite(profilePath(name, "api"), `${JSON.stringify({ auth_mode: "apikey", OPENAI_API_KEY: apiKey }, null, 2)}\n`);
+}
+
+export function switchCodex(name: string, kind: Kind): void {
   assertFileStoreMode();
-  if (!existsSync(profilePath(name))) {
-    throw new Error(`No Codex profile "${name}". Available: ${listCodexProfiles().join(", ") || "(none)"}`);
+  if (!existsSync(profilePath(name, kind))) {
+    const available = listCodexProfiles()
+      .map((p) => profileKey(p.name, p.kind))
+      .join(", ");
+    throw new Error(`No Codex profile "${name}" (${kind}). Available: ${available || "(none)"}`);
   }
-  atomicSymlink(path.join("accounts", `${name}.json`), codexAuthPath());
+  // Never rename over an unmanaged (regular-file) login — that would destroy uncaptured credentials.
+  if (existsSync(codexAuthPath()) && !isSymlink(codexAuthPath())) {
+    throw new Error("Codex has an unmanaged login in auth.json. Capture it first: `hop add <name> --tool codex`.");
+  }
+  atomicSymlink(path.join("accounts", `${profileKey(name, kind)}.json`), codexAuthPath());
 }
 
 function isSymlink(p: string): boolean {
@@ -141,8 +162,8 @@ function isSymlink(p: string): boolean {
 }
 
 /** Refresh an INACTIVE profile's tokens (safe — nothing else holds them). Persists the rotated result. */
-export async function refreshCodexProfile(name: string): Promise<CodexAuth> {
-  const auth = readCodexProfile(name);
+export async function refreshCodexProfile(name: string, kind: Kind): Promise<CodexAuth> {
+  const auth = readCodexProfile(name, kind);
   if (!auth.tokens?.refresh_token) return auth;
   const res = await fetch(OAUTH_TOKEN_URL, {
     method: "POST",
@@ -166,7 +187,7 @@ export async function refreshCodexProfile(name: string): Promise<CodexAuth> {
     },
     last_refresh: new Date().toISOString(),
   };
-  atomicWrite(profilePath(name), `${JSON.stringify(updated, null, 2)}\n`);
+  atomicWrite(profilePath(name, kind), `${JSON.stringify(updated, null, 2)}\n`);
   return updated;
 }
 

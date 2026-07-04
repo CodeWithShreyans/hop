@@ -75,7 +75,7 @@ test("adopt captures claudeAiOauth + identity from the live keychain", async () 
   const profile = await adoptClaude("acct-a", { api: false });
   expect(profile.claudeAiOauth?.accessToken).toBe("A-access");
   expect(profile.oauthAccount?.emailAddress).toBe("a@x.com");
-  expect(readClaudeProfile("acct-a").claudeAiOauth?.accessToken).toBe("A-access");
+  expect(readClaudeProfile("acct-a", "sub").claudeAiOauth?.accessToken).toBe("A-access");
 });
 
 test("switch swaps claudeAiOauth, preserves mcpOAuth, patches claude.json, syncs back the outgoing account", async () => {
@@ -95,7 +95,7 @@ test("switch swaps claudeAiOauth, preserves mcpOAuth, patches claude.json, syncs
       { name: "acct-a", tool: "claude", kind: "sub", savedAt: "t" },
       { name: "acct-b", tool: "claude", kind: "sub", savedAt: "t" },
     ],
-    active: { claude: "acct-a" },
+    active: { claude: "acct-a.sub" },
     previous: {},
   });
 
@@ -113,11 +113,11 @@ test("switch swaps claudeAiOauth, preserves mcpOAuth, patches claude.json, syncs
   expect(cj.oauthAccount.accountUuid).toBe("uuid-b");
 
   // Outgoing account synced back to the LIVE (rotated) token, not the stale snapshot.
-  expect(readClaudeProfile("acct-a").claudeAiOauth?.accessToken).toBe("A-new");
+  expect(readClaudeProfile("acct-a", "sub").claudeAiOauth?.accessToken).toBe("A-new");
 
   const reg = loadRegistry();
-  expect(reg.active.claude).toBe("acct-b");
-  expect(reg.previous.claude).toBe("acct-a");
+  expect(reg.active.claude).toBe("acct-b.sub");
+  expect(reg.previous.claude).toBe("acct-a.sub");
 
   // A backup was taken before the destructive writes.
   expect(readdirSync(path.join(process.env.HOP_HOME ?? "", "backups")).length).toBeGreaterThan(0);
@@ -144,7 +144,7 @@ test("sub-switch removes a leftover console API-key item + primaryApiKey (mirror
       { name: "acct-a", tool: "claude", kind: "sub", savedAt: "t" },
       { name: "acct-b", tool: "claude", kind: "sub", savedAt: "t" },
     ],
-    active: { claude: "acct-a" },
+    active: { claude: "acct-a.sub" },
     previous: {},
   });
 
@@ -182,7 +182,7 @@ test("API-billing switch is non-destructive — subscription OAuth survives for 
       { name: "work", tool: "claude", kind: "sub", savedAt: "t" },
       { name: "api1", tool: "claude", kind: "api", savedAt: "t" },
     ],
-    active: { claude: "work" },
+    active: { claude: "work.sub" },
     previous: {},
   });
 
@@ -192,14 +192,14 @@ test("API-billing switch is non-destructive — subscription OAuth survives for 
   const during = JSON.parse((await securityFind(claudeCredentialsService(), keychainAccount())) ?? "{}");
   expect(during.claudeAiOauth.accessToken).toBe("A-access");
   expect(during.mcpOAuth).toEqual({ notion: "n" });
-  expect(loadRegistry().active.claude).toBe("api1");
+  expect(loadRegistry().active.claude).toBe("api1.api");
 
   // Flip back to the subscription: helper removed, OAuth intact — no re-login needed.
   await switchClaudeSub("work", { safe: false });
   expect(getApiKeyHelper()).toBeNull();
   const after = JSON.parse((await securityFind(claudeCredentialsService(), keychainAccount())) ?? "{}");
   expect(after.claudeAiOauth.accessToken).toBe("A-access");
-  expect(loadRegistry().active.claude).toBe("work");
+  expect(loadRegistry().active.claude).toBe("work.sub");
 });
 
 test("API override toggles apiKeyHelper on and off", async () => {
@@ -213,7 +213,7 @@ test("API override toggles apiKeyHelper on and off", async () => {
   // The helper script must print the stored key on stdout (that's the apiKeyHelper contract).
   const out = Bun.spawnSync(["sh", helper ?? ""]).stdout.toString().trim();
   expect(out).toBe("sk-ant-test-key");
-  expect(loadRegistry().active.claude).toBe("api1");
+  expect(loadRegistry().active.claude).toBe("api1.api");
 
   claudeApiOff();
   expect(getApiKeyHelper()).toBeNull();
