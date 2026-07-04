@@ -167,6 +167,41 @@ test("sub-switch removes a leftover console API-key item + primaryApiKey (mirror
   expect(dirs.some((d) => existsSync(path.join(backupsRoot, d, "apikey.txt")))).toBe(true);
 });
 
+test("API-billing switch is non-destructive — subscription OAuth survives for instant flip-back", async () => {
+  // Unlike a native console/API login (which deletes claudeAiOauth), hop's API switch must preserve it.
+  await securityAdd(
+    claudeCredentialsService(),
+    keychainAccount(),
+    JSON.stringify({ claudeAiOauth: oauth("A-access", "rt-a"), mcpOAuth: { notion: "n" } }),
+  );
+  writeClaudeProfile(subProfile("work", "A-access", "uuid-a", "a@x.com"));
+  writeClaudeProfile({ name: "api1", kind: "api", apiKey: "sk-ant-api-x", savedAt: "t" });
+  saveRegistry({
+    version: 1,
+    profiles: [
+      { name: "work", tool: "claude", kind: "sub", savedAt: "t" },
+      { name: "api1", tool: "claude", kind: "api", savedAt: "t" },
+    ],
+    active: { claude: "work" },
+    previous: {},
+  });
+
+  // Flip to API billing: apiKeyHelper set, but the subscription OAuth stays in the keychain.
+  claudeApiOn("api1");
+  expect(getApiKeyHelper()).not.toBeNull();
+  const during = JSON.parse((await securityFind(claudeCredentialsService(), keychainAccount())) ?? "{}");
+  expect(during.claudeAiOauth.accessToken).toBe("A-access");
+  expect(during.mcpOAuth).toEqual({ notion: "n" });
+  expect(loadRegistry().active.claude).toBe("api1");
+
+  // Flip back to the subscription: helper removed, OAuth intact — no re-login needed.
+  await switchClaudeSub("work", { safe: false });
+  expect(getApiKeyHelper()).toBeNull();
+  const after = JSON.parse((await securityFind(claudeCredentialsService(), keychainAccount())) ?? "{}");
+  expect(after.claudeAiOauth.accessToken).toBe("A-access");
+  expect(loadRegistry().active.claude).toBe("work");
+});
+
 test("API override toggles apiKeyHelper on and off", async () => {
   writeClaudeProfile({ name: "api1", kind: "api", apiKey: "sk-ant-test-key", savedAt: "t" });
   saveRegistry({ version: 1, profiles: [{ name: "api1", tool: "claude", kind: "api", savedAt: "t" }], active: {}, previous: {} });
