@@ -44,8 +44,8 @@ hop next codex              # rotate to the next codex profile
 
 hop add work --tool codex                          # capture the current codex login
 hop add work --tool claude                         # capture the current claude subscription login
-hop add work --tool claude --api --key sk-ant-…    # store a claude API-key variation
-hop add work --tool codex  --api --key sk-proj-…   # store a codex API-key variation
+hop add work --tool claude --api                   # store a claude API-key variation (key from the keychain, or --key sk-ant-…)
+hop add work --tool codex  --api                   # store a codex API-key variation (key from the live `codex login --api-key`, or --key sk-proj-…)
 
 hop which                   # active profile per tool
 hop rm codex work --api     # delete a stored profile snapshot

@@ -97,6 +97,22 @@ test("same name coexists as sub and api; api profile activates via symlink", () 
   expect(readActiveCodex()).toEqual({ state: "managed", name: "work", kind: "sub" });
 });
 
+test("api profile creation pulls the key from the live codex login when --key is omitted", () => {
+  // Native `codex login --api-key` state: regular auth.json with only the key.
+  writeFileSync(codexAuthPath(), JSON.stringify({ auth_mode: "apikey", OPENAI_API_KEY: "sk-proj-from-live" }));
+  const { source } = createCodexApiProfile("work", undefined);
+  expect(source).toBe("live login");
+  expect(readCodexProfile("work", "api").OPENAI_API_KEY).toBe("sk-proj-from-live");
+});
+
+test("api profile creation without any key source fails with guidance", () => {
+  // Logged out (no auth.json) and no key given.
+  expect(() => createCodexApiProfile("work", undefined)).toThrow(/codex login --api-key/);
+  // Subscription login has no OPENAI_API_KEY to pull either.
+  writeFileSync(codexAuthPath(), authJson("alice"));
+  expect(() => createCodexApiProfile("work", undefined)).toThrow(/No API key found/);
+});
+
 test("switch refuses to clobber an unmanaged (regular-file) login", () => {
   writeFileSync(codexAuthPath(), authJson("alice"));
   adoptCodex("alice");

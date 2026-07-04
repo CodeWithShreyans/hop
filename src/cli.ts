@@ -318,12 +318,11 @@ async function cmdAdd(name: string, tool: Tool, api: boolean, key: string | unde
     const reg = loadRegistry();
     if (tool === "codex") {
       if (api) {
-        const apiKey = key ?? process.env.HOP_API_KEY;
-        if (!apiKey) throw new Error("A Codex API profile needs a key: --key sk-… (or HOP_API_KEY).");
-        createCodexApiProfile(name, apiKey);
+        const { source } = createCodexApiProfile(name, key ?? process.env.HOP_API_KEY);
         upsertProfile(reg, { name, tool: "codex", kind: "api", savedAt: new Date().toISOString() });
         saveRegistry(reg);
-        console.log(green(`✓ created codex api profile ${bold(name)}`) + dim(` — activate with \`hop codex ${name} --api\``));
+        const from = source === "live login" ? " (key pulled from the live codex login)" : "";
+        console.log(green(`✓ created codex api profile ${bold(name)}`) + dim(`${from} — activate with \`hop codex ${name} --api\``));
         return;
       }
       const { forkedFrom, kind, auth } = adoptCodex(name);
@@ -430,6 +429,22 @@ async function cmdDoctor(): Promise<void> {
   else if (codexActive.state === "unmanaged") push(false, "Codex auth.json is a regular file (unmanaged) — run `hop add`");
   else if (codexActive.state === "managed") push(true, `Codex active symlink → ${profileKey(codexActive.name, codexActive.kind)}`);
   else push(true, "Codex logged out");
+
+  // A `codex login` run while a profile symlink is active writes THROUGH the link and replaces that
+  // profile's content — detect any profile whose content no longer matches its filename kind.
+  for (const { name, kind } of listCodexProfiles()) {
+    try {
+      const derived = codexIdentity(readCodexProfile(name, kind)).kind;
+      if (derived !== kind) {
+        push(
+          false,
+          `codex profile "${name}" (${kind}) actually contains ${derived} credentials — a \`codex login\` through the active symlink likely overwrote it; recapture with \`hop add\``,
+        );
+      }
+    } catch (e) {
+      push(false, `codex profile "${name}" (${kind}) unreadable: ${errMsg(e)}`);
+    }
+  }
 
   // Claude keychain reachability + mcpOAuth presence + subscription/API-key shadowing
   try {

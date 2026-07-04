@@ -132,10 +132,26 @@ export function adoptCodex(name: string): { forkedFrom: string | null; kind: Kin
   return { forkedFrom, kind, auth: parsed };
 }
 
-/** Create an API-billing profile directly from a key (what `codex login --api-key` would write). */
-export function createCodexApiProfile(name: string, apiKey: string): void {
+/** Create an API-billing profile (what `codex login --api-key` would write). Without an explicit
+ *  key, pulls OPENAI_API_KEY from the live auth.json — i.e. from a native `codex login --api-key`. */
+export function createCodexApiProfile(name: string, apiKey: string | undefined): { source: "given" | "live login" } {
   if (!NAME_RE.test(name)) throw new Error(`Invalid profile name "${name}" (use letters, digits, - and _).`);
-  atomicWrite(profilePath(name, "api"), `${JSON.stringify({ auth_mode: "apikey", OPENAI_API_KEY: apiKey }, null, 2)}\n`);
+  let key = apiKey ?? null;
+  let source: "given" | "live login" = "given";
+  if (!key && existsSync(codexAuthPath())) {
+    const live = parseOrThrow(codexAuthSchema, JSON.parse(readFileSync(codexAuthPath(), "utf-8")), "codex auth.json");
+    if (live.OPENAI_API_KEY) {
+      key = live.OPENAI_API_KEY;
+      source = "live login";
+    }
+  }
+  if (!key) {
+    throw new Error(
+      "No API key found: pass --key sk-…, set HOP_API_KEY, or run `codex login --api-key …` first so hop can pull it from auth.json.",
+    );
+  }
+  atomicWrite(profilePath(name, "api"), `${JSON.stringify({ auth_mode: "apikey", OPENAI_API_KEY: key }, null, 2)}\n`);
+  return { source };
 }
 
 export function switchCodex(name: string, kind: Kind): void {
