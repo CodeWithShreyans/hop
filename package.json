@@ -1,0 +1,21 @@
+{
+  "name": "hop",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Switch Claude Code & Codex accounts and billing without re-running login flows",
+  "bin": {
+    "hop": "./src/cli.ts"
+  },
+  "scripts": {
+    "hop": "bun run src/cli.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "latest"
+  }
+}
