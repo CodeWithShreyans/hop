@@ -5,11 +5,12 @@ Switch **Claude Code** and **Codex** accounts and billing without re-running log
 Ride a subscription until it hits its session/weekly limit, then flip to API-key billing — or bounce between multiple subscription accounts — and every new `claude`/`codex` run picks up the change. macOS only, Bun + TypeScript.
 
 ```
-   TOOL    PROFILE   PLAN            5H   WEEK  RESET
-●  claude  work      max · me@co.com 12%  40%   3h10m
-   claude  personal  pro · me@gmail  —    —     —
-   claude  api       API billing     —    —     —
-●  codex   work      team · me@co.com 88% 61%   42m
+   TOOL    PROFILE   KIND  PLAN            5H   WEEK  RESET
+●  claude  work      sub   max · me@co.com 12%  40%   3h10m
+   claude  work      api   API billing     —    —     —
+   claude  personal  sub   pro · me@gmail  —    —     —
+●  codex   work      sub   team · me@co.com 88% 61%   42m
+   codex   work      api   API billing     —    —     —
 ```
 
 ## How it works
@@ -46,10 +47,10 @@ hop claude work --sub       # explicit kind always wins
 hop -                       # switch to the previous profile
 hop next codex              # rotate to the next codex profile
 
-hop add work --tool codex                          # capture the current codex login
-hop add work --tool claude                         # capture the current claude subscription login
-hop add work --tool claude --api                   # store a claude API-key variation (key from the keychain, or --key sk-ant-…)
-hop add work --tool codex  --api                   # store a codex API-key variation (key from the live `codex login --api-key`, or --key sk-proj-…)
+hop add work --tool codex                          # capture work (sub) from the current codex login
+hop add work --tool claude                         # capture work (sub) from the current claude subscription login
+hop add work --tool claude --api                   # store work (api) alongside work (sub) (key from the keychain, or --key sk-ant-…)
+hop add work --tool codex  --api                   # store work (api) alongside work (sub) (key from the live `codex login --api-key`, or --key sk-proj-…)
 
 hop which                   # active profile per tool
 hop rm codex work --api     # delete a stored profile snapshot
