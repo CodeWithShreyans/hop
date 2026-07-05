@@ -151,10 +151,25 @@ const claudeWindowSchema = z.looseObject({
   utilization: z.number().nullish(),
   resets_at: z.string().nullish(),
 });
+/** Entry in the newer `limits` array — supersedes the legacy top-level windows (which now come
+ *  back null on some plans). Model-scoped weekly entries carry the per-model limits (e.g. Fable). */
+const claudeLimitSchema = z.looseObject({
+  kind: z.string().nullish(),
+  group: z.string().nullish(),
+  percent: z.number().nullish(),
+  severity: z.string().nullish(),
+  resets_at: z.string().nullish(),
+  scope: z
+    .looseObject({
+      model: z.looseObject({ id: z.string().nullish(), display_name: z.string().nullish() }).nullish(),
+    })
+    .nullish(),
+});
 export const claudeUsageSchema = z.looseObject({
   five_hour: claudeWindowSchema.nullish(),
   seven_day: claudeWindowSchema.nullish(),
   seven_day_opus: claudeWindowSchema.nullish(),
   seven_day_sonnet: claudeWindowSchema.nullish(),
+  limits: z.array(claudeLimitSchema).nullish(),
 });
 export type ClaudeUsage = z.infer<typeof claudeUsageSchema>;

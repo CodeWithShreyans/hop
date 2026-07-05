@@ -9,6 +9,7 @@ import {
   listClaudeProfiles,
   readActiveClaude,
   readClaudeKeychain,
+  readClaudeOauthAccount,
   readClaudeProfile,
   refreshClaudeToken,
   securityFind,
@@ -83,51 +84,65 @@ type Row = {
   label: string; // plan / email
   fiveHour: UsageWindow;
   weekly: UsageWindow;
+  fable: UsageWindow; // claude model-scoped weekly limit for the Fable family
   resets: number | null; // codex on-demand usage-limit reset credits
   note?: string;
 };
 
 const skipUsage = (): boolean => Boolean(process.env.HOP_SKIP_USAGE);
 
-type SubWindows = { fiveHour: UsageWindow; weekly: UsageWindow };
+type SubWindows = { fiveHour: UsageWindow; weekly: UsageWindow; fable: UsageWindow };
 
 /** Live 5h/weekly windows for a codex sub profile (refreshes an inactive profile's expired token). */
 async function codexSubWindows(name: string, isActive: boolean): Promise<SubWindows> {
   let auth = readCodexProfile(name, "sub");
-  if (!auth.tokens?.access_token) return { fiveHour: null, weekly: null };
+  if (!auth.tokens?.access_token) return { fiveHour: null, weekly: null, fable: null };
   const exp = decodeJwt(auth.tokens.access_token, codexJwtClaimsSchema)?.exp ?? null;
   if (!isActive && exp && exp * 1000 < Date.now() + 60_000 && auth.tokens.refresh_token) {
     auth = await refreshCodexProfile(name, "sub");
   }
   const token = auth.tokens?.access_token;
-  if (!token) return { fiveHour: null, weekly: null };
+  if (!token) return { fiveHour: null, weekly: null, fable: null };
   const usage = await fetchCodexUsage(token, codexIdentity(auth).accountId);
   const prim = usage.rate_limit?.primary_window;
   const sec = usage.rate_limit?.secondary_window;
   return {
     fiveHour: prim ? { pct: prim.used_percent, resetMs: prim.reset_at ? prim.reset_at * 1000 - Date.now() : null } : null,
     weekly: sec ? { pct: sec.used_percent, resetMs: sec.reset_at ? sec.reset_at * 1000 - Date.now() : null } : null,
+    fable: null,
   };
 }
 
-/** Live 5h/weekly windows for a claude sub profile (live keychain token when active). */
+/** Live 5h/weekly/fable windows for a claude sub profile. Uses the live keychain token whenever the
+ *  keychain login is attributable to this profile (active, or shadowed by an api override) — it is
+ *  always fresher than the snapshot, and skipping the refresh avoids burning a rotated refresh token. */
 async function claudeSubWindows(name: string, isActive: boolean): Promise<SubWindows> {
   const profile = readClaudeProfile(name, "sub");
-  if (!profile.claudeAiOauth) return { fiveHour: null, weekly: null };
+  if (!profile.claudeAiOauth) return { fiveHour: null, weekly: null, fable: null };
   let oauth = profile.claudeAiOauth;
-  if (isActive) {
-    const kc = await readClaudeKeychain();
-    if (kc?.parsed.claudeAiOauth) oauth = kc.parsed.claudeAiOauth;
+  const kc = await readClaudeKeychain();
+  const liveUuid = readClaudeOauthAccount()?.accountUuid ?? null;
+  const ownsLive = isActive || (liveUuid !== null && profile.oauthAccount?.accountUuid === liveUuid);
+  if (kc?.parsed.claudeAiOauth && ownsLive) {
+    oauth = kc.parsed.claudeAiOauth;
   } else if (oauth.expiresAt && oauth.expiresAt < Date.now() + 60_000) {
     oauth = await refreshClaudeToken(oauth);
     writeClaudeProfile({ ...profile, claudeAiOauth: oauth });
   }
   const usage = await fetchClaudeUsage(oauth.accessToken);
-  const toWin = (u: { utilization?: number | null; resets_at?: string | null } | null | undefined): UsageWindow => {
-    if (!u || u.utilization === null || u.utilization === undefined) return null;
-    return { pct: u.utilization, resetMs: u.resets_at ? Date.parse(u.resets_at) - Date.now() : null };
+  const toWin = (u: { percent?: number | null; utilization?: number | null; resets_at?: string | null } | null | undefined): UsageWindow => {
+    const pct = u?.percent ?? u?.utilization;
+    if (pct === null || pct === undefined) return null;
+    return { pct, resetMs: u?.resets_at ? Date.parse(u.resets_at) - Date.now() : null };
   };
-  return { fiveHour: toWin(usage.five_hour), weekly: toWin(usage.seven_day) };
+  // The newer `limits` array supersedes the legacy top-level windows (null on some plans now).
+  // Unscoped session/weekly entries back-fill 5H/WEEK; the model-scoped Fable entry is its own window.
+  const limits = usage.limits ?? [];
+  return {
+    fiveHour: toWin(usage.five_hour) ?? toWin(limits.find((l) => l.group === "session" && !l.scope?.model)),
+    weekly: toWin(usage.seven_day) ?? toWin(limits.find((l) => l.group === "weekly" && !l.scope?.model)),
+    fable: toWin(limits.find((l) => l.scope?.model?.display_name?.toLowerCase().includes("fable"))),
+  };
 }
 
 /** Windows or null when unknowable (usage disabled, network/auth failure) — callers fail open. */
@@ -147,7 +162,7 @@ function exhaustedLabel(w: SubWindows | null): string | null {
     win && win.pct >= 100
       ? `${label} at ${Math.round(win.pct)}%${win.resetMs !== null && win.resetMs > 0 ? ` (resets in ${fmtCountdown(win.resetMs)})` : ""}`
       : null;
-  const parts = [part("5h", w.fiveHour), part("weekly", w.weekly)].filter((p) => p !== null);
+  const parts = [part("5h", w.fiveHour), part("weekly", w.weekly), part("fable weekly", w.fable)].filter((p) => p !== null);
   return parts.length ? parts.join("; ") : null;
 }
 
@@ -160,7 +175,7 @@ async function codexRows(): Promise<Row[]> {
       const auth = readCodexProfile(name, kind);
       const id = codexIdentity(auth);
       const label = kind === "api" ? "API billing" : [id.plan, id.email].filter(Boolean).join(" · ") || "subscription";
-      const row: Row = { tool: "codex", name, kind, active: isActive, label, fiveHour: null, weekly: null, resets: null };
+      const row: Row = { tool: "codex", name, kind, active: isActive, label, fiveHour: null, weekly: null, fable: null, resets: null };
       if (kind === "api" || skipUsage()) return row;
       try {
         const w = await codexSubWindows(name, isActive);
@@ -198,6 +213,7 @@ async function claudeRows(): Promise<Row[]> {
         label: [kind === "api" ? "API billing" : idl.plan, idl.email].filter(Boolean).join(" · ") || kind,
         fiveHour: null,
         weekly: null,
+        fable: null,
         resets: null,
       };
       if (kind === "api") {
@@ -209,6 +225,7 @@ async function claudeRows(): Promise<Row[]> {
         const w = await claudeSubWindows(name, isActive);
         row.fiveHour = w.fiveHour;
         row.weekly = w.weekly;
+        row.fable = w.fable;
       } catch (e) {
         row.note = errMsg(e);
       }
@@ -230,15 +247,16 @@ function renderTable(rows: Row[]): string {
   if (rows.length === 0) {
     return dim("No profiles yet. Capture your current logins:\n  hop add <name> --tool codex\n  hop add <name> --tool claude");
   }
-  const header = ["", "TOOL", "PROFILE", "KIND", "PLAN", "5H", "WEEK", "RESET IN", "RESETS"];
+  const header = ["", "TOOL", "PROFILE", "KIND", "PLAN", "5H", "WEEK", "FABLE", "RESET IN", "RESETS"];
   const body = rows.map((r) => {
     const c = cell(r.fiveHour);
     const w = cell(r.weekly);
-    const resetText = r.fiveHour ? c.reset : w.reset;
+    const f = cell(r.fable);
+    const resetText = r.fiveHour ? c.reset : r.weekly ? w.reset : f.reset;
     const plan = r.note ? `${r.label} ${dim(`(${r.note})`)}` : r.label;
     const resets = r.resets === null ? dim("—") : r.resets > 0 ? green(String(r.resets)) : String(r.resets);
     return {
-      cells: [r.active ? green("●") : " ", r.tool, r.name, r.kind, plan, c.pct, w.pct, resetText, resets],
+      cells: [r.active ? green("●") : " ", r.tool, r.name, r.kind, plan, c.pct, w.pct, f.pct, resetText, resets],
       strong: r.active,
     };
   });

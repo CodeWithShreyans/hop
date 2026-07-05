@@ -5,12 +5,12 @@ Switch **Claude Code** and **Codex** accounts and billing without re-running log
 Ride a subscription until it hits its session/weekly limit, then flip to API-key billing — or bounce between multiple subscription accounts — and every new `claude`/`codex` run picks up the change. macOS only, Bun + TypeScript.
 
 ```
-   TOOL    PROFILE   KIND  PLAN            5H   WEEK  RESET
-●  claude  work      sub   max · me@co.com 12%  40%   3h10m
-   claude  work      api   API billing     —    —     —
-   claude  personal  sub   pro · me@gmail  —    —     —
-●  codex   work      sub   team · me@co.com 88% 61%   42m
-   codex   work      api   API billing     —    —     —
+   TOOL    PROFILE   KIND  PLAN             5H   WEEK  FABLE  RESET IN  RESETS
+●  claude  work      sub   max · me@co.com  12%  40%   88%    3h10m     —
+   claude  work      api   API billing      —    —     —      —         —
+   claude  personal  sub   pro · me@gmail   —    —     —      —         —
+●  codex   work      sub   team · me@co.com 88%  61%   —      42m       2
+   codex   work      api   API billing      —    —     —      —         —
 ```
 
 ## How it works
@@ -49,6 +49,8 @@ hop <tool> <profile>
 after switch
 `-- landed on an exhausted sub -> warn
 ```
+
+Claude subscriptions carry a separate model-scoped weekly limit for the **Fable 5** family, reported in the usage endpoint's newer `limits` array rather than the legacy top-level windows (which now return `null` on some plans). The `FABLE` column shows it; the `5H`/`WEEK` columns fall back to the array's unscoped session/weekly entries when the legacy fields are empty.
 
 ```bash
 hop                         # status table: active account, usage headroom, and (codex) on-demand
