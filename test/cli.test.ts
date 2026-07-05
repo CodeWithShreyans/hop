@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 
@@ -182,6 +182,93 @@ test("exhausted-sub warning mentions available usage-limit resets", async () => 
     expect(res.code).toBe(0);
     expect(res.out).toContain("subscription is exhausted");
     expect(res.out).toContain("2 usage-limit resets available");
+  } finally {
+    server.stop();
+  }
+});
+
+/* ── claude usage: the newer `limits` array (model-scoped Fable weekly limit) ── */
+
+/** Claude usage fixture: legacy top-level windows null (as newer plans return) + a `limits` array. */
+function claudeUsageServer(fiveHourPct: number, fablePct: number): ReturnType<typeof Bun.serve> {
+  const in1h = new Date(Date.now() + 3_600_000).toISOString();
+  const in3d = new Date(Date.now() + 3 * 86_400_000).toISOString();
+  return Bun.serve({
+    port: 0,
+    fetch: () =>
+      Response.json({
+        five_hour: null,
+        seven_day: null,
+        limits: [
+          { kind: "session", group: "session", percent: fiveHourPct, severity: "normal", resets_at: in1h, scope: null, is_active: false },
+          {
+            kind: "weekly_scoped",
+            group: "weekly",
+            percent: fablePct,
+            severity: fablePct >= 100 ? "critical" : "normal",
+            resets_at: in3d,
+            scope: { model: { id: null, display_name: "Fable" }, surface: null },
+            is_active: fablePct >= 100,
+          },
+        ],
+      }),
+  });
+}
+
+/** Seed an inactive claude sub profile (unexpired token → fetches usage without keychain/refresh). */
+function seedClaudeProfiles(): void {
+  const dir = path.join(env.HOP_HOME ?? "", "claude");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    path.join(dir, "cl.sub.json"),
+    JSON.stringify({
+      name: "cl",
+      kind: "sub",
+      claudeAiOauth: { accessToken: "sk-ant-oat-test", refreshToken: "sk-ant-ort-test", expiresAt: Date.now() + 3_600_000 },
+      savedAt: "2026-07-05T00:00:00Z",
+    }),
+  );
+  writeFileSync(
+    path.join(dir, "cl.api.json"),
+    JSON.stringify({ name: "cl", kind: "api", apiKey: "sk-ant-api-test", savedAt: "2026-07-05T00:00:00Z" }),
+  );
+}
+
+test("status surfaces claude's fable limit from the limits array (5h back-filled, week stays empty)", async () => {
+  seedClaudeProfiles();
+  const server = claudeUsageServer(47, 88);
+  const codexServer = usageServer(1, 1); // codex rows must not reach out to the real backend
+  try {
+    const res = await hop(["status", "--json"], {
+      ...mockEnv(codexServer),
+      HOP_CLAUDE_USAGE_URL: `http://localhost:${server.port}/usage`,
+    });
+    expect(res.code).toBe(0);
+    const rows: { tool: string; name: string; kind: string; fiveHour: { pct: number } | null; weekly: { pct: number } | null; fable: { pct: number } | null }[] =
+      JSON.parse(res.out);
+    const row = rows.find((r) => r.tool === "claude" && r.name === "cl" && r.kind === "sub");
+    expect(row?.fable?.pct).toBe(88);
+    expect(row?.fiveHour?.pct).toBe(47); // unscoped session entry back-fills the legacy null
+    expect(row?.weekly).toBeNull(); // the model-scoped fable entry must NOT masquerade as the general weekly
+  } finally {
+    server.stop();
+    codexServer.stop();
+  }
+});
+
+test("no flag, different claude profile with an exhausted fable limit: defaults to api", async () => {
+  seedClaudeProfiles();
+  const server = claudeUsageServer(20, 100);
+  try {
+    const res = await hop(["claude", "cl"], {
+      HOP_SKIP_USAGE: "",
+      HOP_CLAUDE_USAGE_URL: `http://localhost:${server.port}/usage`,
+    });
+    expect(res.code).toBe(0);
+    expect(res.out).toContain("fable weekly at 100%");
+    expect(res.out).toContain("defaulting to api");
+    const settings = JSON.parse(readFileSync(path.join(env.CLAUDE_CONFIG_DIR ?? "", "settings.json"), "utf-8"));
+    expect(typeof settings.apiKeyHelper).toBe("string"); // api override actually engaged
   } finally {
     server.stop();
   }
