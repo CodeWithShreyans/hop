@@ -35,7 +35,20 @@ hop completions fish > ~/.config/fish/completions/hop.fish
 
 A profile is **(tool, name, kind)** — the same name can exist as `sub` and `api` for each tool, so "work" can have up to 4 variations. Switching to an `api` profile flips billing automatically (Claude: `apiKeyHelper` toggle; Codex: symlink to an API-key auth.json); switching to a `sub` profile swaps the login and clears any API override.
 
-Without a `--sub`/`--api` flag, hop picks the kind for you: switching **within the active profile** toggles sub↔api (`hop claude work` while on `work (sub)` flips to API billing — the "I just hit my limit" motion); switching to a **different profile** defaults to sub, unless that sub's 5h/weekly/Fable window is already exhausted, in which case it goes to api. Landing on an exhausted sub always warns after the switch.
+Kind selection:
+
+```text
+hop <tool> <profile>
+|-- --sub / --api present -> switch to that kind
+`-- no kind flag
+    |-- same tool+profile is active -> toggle sub <-> api
+    `-- different profile
+        |-- sub has headroom -> switch to sub
+        `-- sub is exhausted -> switch to api
+
+after switch
+`-- landed on an exhausted sub -> warn
+```
 
 Claude subscriptions carry a separate model-scoped weekly limit for the **Fable 5** family, reported in the usage endpoint's newer `limits` array rather than the legacy top-level windows (which now return `null` on some plans). The `FABLE` column shows it; the `5H`/`WEEK` columns fall back to the array's unscoped session/weekly entries when the legacy fields are empty.
 
