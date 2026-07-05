@@ -5,12 +5,12 @@ Switch **Claude Code** and **Codex** accounts and billing without re-running log
 Ride a subscription until it hits its session/weekly limit, then flip to API-key billing — or bounce between multiple subscription accounts — and every new `claude`/`codex` run picks up the change. macOS only, Bun + TypeScript.
 
 ```
-   TOOL    PROFILE   KIND  PLAN            5H   WEEK  RESET
-●  claude  work      sub   max · me@co.com 12%  40%   3h10m
-   claude  work      api   API billing     —    —     —
-   claude  personal  sub   pro · me@gmail  —    —     —
-●  codex   work      sub   team · me@co.com 88% 61%   42m
-   codex   work      api   API billing     —    —     —
+   TOOL    PROFILE   KIND  PLAN             5H   WEEK  FABLE  RESET IN  RESETS
+●  claude  work      sub   max · me@co.com  12%  40%   88%    3h10m     —
+   claude  work      api   API billing      —    —     —      —         —
+   claude  personal  sub   pro · me@gmail   —    —     —      —         —
+●  codex   work      sub   team · me@co.com 88%  61%   —      42m       2
+   codex   work      api   API billing      —    —     —      —         —
 ```
 
 ## How it works
@@ -35,7 +35,9 @@ hop completions fish > ~/.config/fish/completions/hop.fish
 
 A profile is **(tool, name, kind)** — the same name can exist as `sub` and `api` for each tool, so "work" can have up to 4 variations. Switching to an `api` profile flips billing automatically (Claude: `apiKeyHelper` toggle; Codex: symlink to an API-key auth.json); switching to a `sub` profile swaps the login and clears any API override.
 
-Without a `--sub`/`--api` flag, hop picks the kind for you: switching **within the active profile** toggles sub↔api (`hop claude work` while on `work (sub)` flips to API billing — the "I just hit my limit" motion); switching to a **different profile** defaults to sub, unless that sub's 5h/weekly window is already exhausted, in which case it goes to api. Landing on an exhausted sub always warns after the switch.
+Without a `--sub`/`--api` flag, hop picks the kind for you: switching **within the active profile** toggles sub↔api (`hop claude work` while on `work (sub)` flips to API billing — the "I just hit my limit" motion); switching to a **different profile** defaults to sub, unless that sub's 5h/weekly/Fable window is already exhausted, in which case it goes to api. Landing on an exhausted sub always warns after the switch.
+
+Claude subscriptions carry a separate model-scoped weekly limit for the **Fable 5** family, reported in the usage endpoint's newer `limits` array rather than the legacy top-level windows (which now return `null` on some plans). The `FABLE` column shows it; the `5H`/`WEEK` columns fall back to the array's unscoped session/weekly entries when the legacy fields are empty.
 
 ```bash
 hop                         # status table: active account, usage headroom, and (codex) on-demand
